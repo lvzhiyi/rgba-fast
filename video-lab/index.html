@@ -6,7 +6,7 @@
   <title>RGBA Lab · JavaScript / WebAssembly</title>
   <link rel="stylesheet" href="style.css">
   <script defer src="assets/lucide.min.js"></script>
-  <script type="module" src="wasm-video/dip.js"></script>
+  <script type="module" src="src/app.js"></script>
 </head>
 <body>
   <header>
@@ -46,7 +46,7 @@
         <button id="capture" disabled><i data-lucide="camera"></i>截取当前帧</button>
         <label>实时滤镜<select id="live-mode"><option value="none">原始画面</option><option value="js">JavaScript</option><option value="scalar">Wasm · 标量</option><option value="simd" selected>Wasm · SIMD128</option></select></label>
       </div></div>
-      <div class="images"><figure><figcaption><span>输入</span><span id="source-name">示例图片</span></figcaption><div class="media-surface"><canvas id="input-canvas" width="1280" height="720"></canvas><video id="video" preload="metadata" muted loop playsinline src="wasm-video/video.mp4" hidden></video></div></figure>
+      <div class="images"><figure><figcaption><span>输入</span><span id="source-name">示例图片</span></figcaption><div class="media-surface"><canvas id="input-canvas" width="1280" height="720"></canvas><video id="video" preload="metadata" muted loop playsinline src="assets/sample.mp4" hidden></video></div></figure>
       <figure><figcaption><span>处理结果</span><span id="preview-meta">等待测试</span></figcaption><div class="media-surface"><canvas id="output-canvas" width="1280" height="720"></canvas></div></figure></div>
       <div class="live-stats"><span>滤镜耗时 <b id="live-filter">--</b> ms</span><span>整帧处理 <b id="live-frame">--</b> ms</span><span>实际回调 <b id="live-fps">--</b> FPS</span><span id="live-state" class="muted">视频已暂停</span></div>
     </section>

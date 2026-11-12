@@ -215,11 +215,11 @@ document.querySelector('.file-button').addEventListener('keydown', event => {
 async function prepareLive(token) {
   const { width, height } = config();
   if (liveEngines?.width === width && liveEngines?.height === height) return true;
-  const scalar = await loadWasm(new URL('./operations/benchmark-scalar.wasm', import.meta.url), width, height);
+  const scalar = await loadWasm(new URL('../wasm/benchmark-scalar.wasm', import.meta.url), width, height);
   if (token !== liveToken) return false;
   let simd;
   try {
-    simd = await loadWasm(new URL('./operations/benchmark-simd.wasm', import.meta.url), width, height);
+    simd = await loadWasm(new URL('../wasm/benchmark-simd.wasm', import.meta.url), width, height);
   } catch {
     if (token === liveToken && $('live-mode').value === 'simd') $('live-mode').value = 'scalar';
   }
@@ -336,7 +336,7 @@ document.addEventListener('visibilitychange', () => {
 try {
   const token = sourceToken;
   const image = new Image();
-  image.src = new URL('../../img/1.jpg', import.meta.url).href;
+  image.src = new URL('../assets/sample.jpg', import.meta.url).href;
   await image.decode();
   if (token !== sourceToken) throw new Error('initial-load-superseded');
   sourceImage = image;

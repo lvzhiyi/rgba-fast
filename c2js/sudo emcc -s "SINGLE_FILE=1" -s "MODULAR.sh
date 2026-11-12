@@ -1,1 +1,0 @@
-sudo emcc -s "SINGLE_FILE=1"  -s "MODULARIZE=1" -s "ALLOW_MEMORY_GROWTH=1" -s "EXPORT_NAME=createModule" -s "EXPORTED_FUNCTIONS=['_get_persons', '_malloc', '_free']" -s "EXPORTED_RUNTIME_METHODS=['cwrap', 'setValue', 'getValue', 'AsciiToString', 'writeStringToMemory']" -o ./c2js/index.js ./c2js/index.c

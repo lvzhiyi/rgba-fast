@@ -11,11 +11,11 @@ self.onmessage = async ({ data }) => {
     const source = new Uint8Array(buffer);
     if (source.length !== width * height * 4) throw new Error('帧数据不完整');
     const js = new JSProcessor(width, height);
-    const scalar = await loadWasm('./operations/benchmark-scalar.wasm', width, height);
+    const scalar = await loadWasm(new URL('../wasm/benchmark-scalar.wasm', import.meta.url), width, height);
     const engines = [{ id: 'js', processor: js }, { id: 'scalar', processor: scalar }];
     let simdError = '';
     try {
-      const simd = await loadWasm('./operations/benchmark-simd.wasm', width, height);
+      const simd = await loadWasm(new URL('../wasm/benchmark-simd.wasm', import.meta.url), width, height);
       engines.push({ id: 'simd', processor: simd });
     } catch (error) {
       simdError = error.message;

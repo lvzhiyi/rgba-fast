@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { readFile } from 'node:fs/promises';
-import { JSProcessor, WasmProcessor, comparePixels, statistics, validateConfig } from '../wasm-video/kernels.js';
+import { JSProcessor, WasmProcessor, comparePixels, statistics, validateConfig } from '../src/kernels.js';
 
 async function processor(kind, width, height) {
-  const binary = await readFile(new URL(`../wasm-video/operations/benchmark-${kind}.wasm`, import.meta.url));
+  const binary = await readFile(new URL(`../wasm/benchmark-${kind}.wasm`, import.meta.url));
   const { instance } = await WebAssembly.instantiate(binary);
   assert.equal(instance.exports.get_simd(), kind === 'simd' ? 1 : 0);
   assert.deepEqual(WebAssembly.Module.imports(new WebAssembly.Module(binary)), []);

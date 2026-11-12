@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "video-lab",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["video-lab/serve.mjs"],
+      "port": 5500
+    }
+  ]
+}
