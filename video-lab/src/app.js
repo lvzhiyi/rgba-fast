@@ -1,5 +1,6 @@
 import { JSProcessor, loadWasm } from './kernels.js';
 import { LiveMeter, coverRect } from './live-stats.js';
+import { EFFECTS, getEffect } from './effects.js';
 
 const $ = id => document.getElementById(id);
 const inputCanvas = $('input-canvas');
@@ -22,7 +23,7 @@ const history = [];
 
 function config() {
   const [width, height] = $('resolution').value.split('x').map(Number);
-  return { width, height, passes: Number($('passes').value), samples: Number($('samples').value) };
+  return { width, height, passes: Number($('passes').value), samples: Number($('samples').value), effect: $('effect').value };
 }
 
 function status(text, error = false) {
@@ -34,7 +35,7 @@ function setBusy(value) {
   busy = value;
   $('run').disabled = value || !frame;
   $('cancel').hidden = !value;
-  for (const id of ['resolution', 'passes', 'samples', 'upload', 'capture', 'video-toggle', 'live-mode', 'live-source', 'live-pipeline']) {
+  for (const id of ['resolution', 'passes', 'samples', 'effect', 'upload', 'capture', 'video-toggle', 'live-mode', 'live-source', 'live-pipeline']) {
     $(id).disabled = value || (id === 'capture' && !playing);
   }
   document.querySelector('.file-button').classList.toggle('disabled', value);
@@ -55,6 +56,10 @@ function fitSource(source) {
   $('run').disabled = busy;
 }
 
+function effectMeta(effect) {
+  return `${effect.name} · ${effect.kind === 'convolution' ? '3×3 卷积 · 保留边界与 Alpha' : '颜色矩阵 · 保留 Alpha'}`;
+}
+
 function resetResults() {
   lastResult = undefined;
   $('export').disabled = true;
@@ -64,7 +69,7 @@ function resetResults() {
   $('validation-detail').textContent = '逐字节比较';
   $('preview-meta').textContent = '等待测试';
   $('progress').style.width = '0%';
-  $('test-meta').textContent = '3×3 均值模糊 · 保留边界与 Alpha';
+  $('test-meta').textContent = effectMeta(getEffect($('effect').value));
   $('bars').replaceChildren();
   $('result-rows').innerHTML = Object.entries(names).map(([id, name]) =>
     `<tr><td><span class="dot ${id}"></span>${name}</td><td colspan="6" class="empty">等待测试</td></tr>`).join('');
@@ -101,7 +106,8 @@ function stopVideo() {
 function showResult(result) {
   lastResult = { ...result, timestamp: new Date().toISOString(), userAgent: navigator.userAgent,
     frameRevision, source: $('source-name').textContent,
-    algorithm: '3x3 integer box blur; preserve border and alpha',
+    algorithm: { id: result.config.effect, ...getEffect(result.config.effect),
+      formula: 'clamp((sum + bias) >> shift, 0, 255); alpha preserved' },
     build: 'Clang -O3; scalar / explicit SIMD128',
     timing: 'Worker; allocation, load, decode and Canvas excluded' };
   delete lastResult.output;
@@ -129,15 +135,16 @@ function showResult(result) {
   $('validation').textContent = '完全一致';
   $('validation-detail').textContent = `${(js.check.bytes / 4).toLocaleString()} 像素 · 最大通道误差 0`;
   const { width, height, passes, samples } = result.config;
-  $('test-meta').textContent = `${width} × ${height} · ${passes} 轮 · ${samples} 批 × ${result.batchSize} 次 · 预热 ${result.warmup} 次`;
+  const effect = getEffect(result.config.effect);
+  $('test-meta').textContent = `${effect.name} · ${width} × ${height} · ${passes} 轮 · ${samples} 批 × ${result.batchSize} 次 · 预热 ${result.warmup} 次`;
   $('result-note').textContent = '耗时为每批的单次均值，P95 为批均值 P95。总耗时含输入复制、计算和输出复制；分项中位数之和不一定等于总中位数。加速比小于 1 表示 Wasm 更慢。';
   const max = Math.max(...result.rows.map(row => row.total.median));
   $('bars').innerHTML = result.rows.map(row => `<div class="bar-row"><span>${names[row.id]}</span><div class="bar-track"><div class="bar-fill ${row.id}" style="width:${row.total.median / max * 100}%"></div></div><span class="bar-value">${ms(row.total.median)}</span></div>`).join('');
   outputContext.putImageData(new ImageData(new Uint8ClampedArray(result.output), width, height), 0, 0);
-  $('preview-meta').textContent = `${passes} 轮模糊 · ${simd ? '三种' : '两种'}输出一致`;
-  history.unshift({ time: new Date().toLocaleTimeString(), width, height, passes, computeRatio, totalRatio, result: lastResult });
+  $('preview-meta').textContent = `${effect.name} ${passes} 轮 · ${simd ? '三种' : '两种'}输出一致`;
+  history.unshift({ time: new Date().toLocaleTimeString(), effect: effect.name, width, height, passes, computeRatio, totalRatio, result: lastResult });
   history.splice(8);
-  $('history').innerHTML = history.map((row, index) => `<tr><td>${row.time}</td><td>${row.width} × ${row.height}</td><td>${row.passes}</td><td>${row.computeRatio?.toFixed(2) ?? '--'}×</td><td>${row.totalRatio?.toFixed(2) ?? '--'}×</td><td class="pass">通过</td><td><button class="icon-button" data-history="${index}" title="导出这次测试的原始数据" aria-label="导出 ${row.time} 的原始数据"><i data-lucide="download"></i></button></td></tr>`).join('');
+  $('history').innerHTML = history.map((row, index) => `<tr><td>${row.time}</td><td>${row.effect}</td><td>${row.width} × ${row.height}</td><td>${row.passes}</td><td>${row.computeRatio?.toFixed(2) ?? '--'}×</td><td>${row.totalRatio?.toFixed(2) ?? '--'}×</td><td class="pass">通过</td><td><button class="icon-button" data-history="${index}" title="导出这次测试的原始数据" aria-label="导出 ${row.time} 的原始数据"><i data-lucide="download"></i></button></td></tr>`).join('');
   window.lucide?.createIcons();
   $('export').disabled = false;
   status('测试完成');
@@ -183,6 +190,22 @@ $('cancel').addEventListener('click', () => {
   setBusy(false);
   status('已停止，本次未生成结果');
   $('progress').style.width = '0%';
+});
+
+// 效果下拉框由效果表生成；切换效果不打断实时处理，直接下发给正在运行的管线。
+$('effect').innerHTML = Object.entries(EFFECTS).map(([id, effect]) =>
+  `<option value="${id}" title="${effect.note}">${effect.name}</option>`).join('');
+$('effect').addEventListener('change', () => {
+  resetResults();
+  const effect = getEffect($('effect').value);
+  if (liveEngines) for (const engine of [liveEngines.js, liveEngines.scalar, liveEngines.simd]) engine?.setEffect(effect);
+  if (playing && liveKind === 'worker') pipeline.worker.postMessage({ type: 'effect', effect: $('effect').value });
+  if (playing) {
+    resetLiveStats();
+    lastLiveStats = performance.now();
+    $('preview-meta').textContent = `${effect.name} · ${liveKind === 'worker' ? 'Worker' : '主线程'}`;
+  }
+  status(`效果：${effect.name}`);
 });
 
 for (const id of ['resolution', 'passes', 'samples']) {
@@ -239,6 +262,7 @@ async function prepareLive(token) {
   // 所有资源就绪后才提交，过期请求不能覆盖新尺寸的引擎。
   if (token !== liveToken) return false;
   liveEngines = { width, height, js: new JSProcessor(width, height), scalar, simd };
+  for (const engine of [liveEngines.js, scalar, simd]) engine?.setEffect(getEffect($('effect').value));
   liveOutput = outputContext.createImageData(width, height);
   return true;
 }
@@ -380,7 +404,7 @@ async function startWorkerPipeline(token) {
   const stream = liveStream || video.captureStream?.() || video.mozCaptureStream?.();
   if (!liveStream && stream) captureStream = stream;
   const track = stream?.getVideoTracks()[0];
-  const message = { type: 'start', width, height, passes, mode: $('live-mode').value,
+  const message = { type: 'start', width, height, passes, mode: $('live-mode').value, effect: $('effect').value,
     frameRate: track?.getSettings().frameRate };
   let source = 'frames';
   let transfer = [];
@@ -458,7 +482,7 @@ $('video-toggle').addEventListener('click', async () => {
     $('video-toggle').innerHTML = '<i data-lucide="pause"></i>停止实时';
     $('capture').disabled = false;
     $('live-state').textContent = $('live-source').value === 'camera' ? '摄像头实时处理中' : '视频实时处理中';
-    $('preview-meta').textContent = liveKind === 'worker' ? '实时滤镜 · Worker' : '实时滤镜 · 主线程';
+    $('preview-meta').textContent = `${getEffect($('effect').value).name} · ${liveKind === 'worker' ? 'Worker' : '主线程'}`;
     if (liveKind === 'main') cancelFrame = scheduleFrame(drawVideo);
     window.lucide?.createIcons();
   } catch (error) {

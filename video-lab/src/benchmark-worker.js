@@ -1,4 +1,5 @@
 import { JSProcessor, loadWasm, comparePixels, statistics, validateConfig } from './kernels.js';
+import { getEffect } from './effects.js';
 
 const pause = () => new Promise(resolve => setTimeout(resolve, 0));
 const WARMUP = 12;
@@ -6,6 +7,7 @@ const WARMUP = 12;
 self.onmessage = async ({ data }) => {
   try {
     const { width, height, passes, samples, buffer } = data;
+    const effect = getEffect(data.effect);
     validateConfig(width, height, passes);
     if (!Number.isInteger(samples) || samples < 10 || samples > 100) throw new Error('样本数无效');
     const source = new Uint8Array(buffer);
@@ -20,6 +22,7 @@ self.onmessage = async ({ data }) => {
     } catch (error) {
       simdError = error.message;
     }
+    for (const engine of engines) engine.processor.setEffect(effect);
     const expected = js.run(source, passes).slice();
     const checks = {};
     for (const engine of engines) {
@@ -86,7 +89,7 @@ self.onmessage = async ({ data }) => {
         Object.entries(engine.times).map(([key, values]) => [key, statistics(values)])) };
     });
     self.postMessage({ type: 'result', rows, simdError, warmup: WARMUP, batchSize,
-      config: { width, height, passes, samples }, output: expected.buffer }, [expected.buffer]);
+      config: { width, height, passes, samples, effect: data.effect }, output: expected.buffer }, [expected.buffer]);
   } catch (error) {
     self.postMessage({ type: 'error', message: error.message });
   }

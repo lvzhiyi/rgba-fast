@@ -1,5 +1,6 @@
 import { JSProcessor, loadWasm, validateConfig } from './kernels.js';
 import { LiveMeter, coverRect, droppedBetween } from './live-stats.js';
+import { getEffect } from './effects.js';
 
 // 实时视频管线（Worker 端）：VideoFrame → Wasm 线性内存 → 滤镜 → OffscreenCanvas。
 // 帧来源两种：MediaStreamTrackProcessor 的 ReadableStream，或主线程逐帧转移的 VideoFrame。
@@ -34,6 +35,11 @@ async function prepareEngines(width, height) {
   const images = new Map(views.map(view =>
     [view, new ImageData(new Uint8ClampedArray(view.buffer, view.byteOffset, view.length), width, height)]));
   engines = { width, height, plain, js, scalar, simd, images };
+}
+
+function applyEffect(id) {
+  const effect = getEffect(id);
+  for (const engine of [engines.js, engines.scalar, engines.simd]) engine?.setEffect(effect);
 }
 
 // 把一帧写进目标缓冲区（Wasm 输入区或 JS 数组），返回实际采用的路径。
@@ -147,11 +153,12 @@ self.onmessage = async ({ data }) => {
   } else if (data.type === 'start') {
     stop();
     const token = session;
-    const { width, height, passes, mode, frameRate } = data;
+    const { width, height, passes, mode, frameRate, effect } = data;
     try {
       validateConfig(width, height, passes);
       await prepareEngines(width, height);
       if (token !== session) return;
+      applyEffect(effect);
       settings = { width, height, passes, mode, interval: frameRate > 0 ? 1e6 / frameRate : 0 };
       canvas.width = width;
       canvas.height = height;
@@ -181,6 +188,15 @@ self.onmessage = async ({ data }) => {
     self.postMessage({ type: 'ready', session: data.session });
   } else if (data.type === 'mode') {
     if (settings) settings.mode = data.mode;
+    meter.reset();
+    lastStats = performance.now();
+  } else if (data.type === 'effect') {
+    // 效果参数写进 Wasm 内存即可，下一帧生效，无需重启管线。
+    try {
+      if (engines) applyEffect(data.effect);
+    } catch (error) {
+      self.postMessage({ type: 'error', message: error.message });
+    }
     meter.reset();
     lastStats = performance.now();
   } else if (data.type === 'stop') {

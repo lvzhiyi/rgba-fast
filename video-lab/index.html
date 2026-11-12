@@ -16,7 +16,8 @@
   <main>
     <section class="controls" aria-label="测试参数">
       <label>分辨率<select id="resolution"><option value="640x360">640 × 360</option><option value="1280x720" selected>1280 × 720</option><option value="1920x1080">1920 × 1080</option></select></label>
-      <label>模糊轮数<select id="passes"><option value="1">1 轮</option><option value="4" selected>4 轮</option><option value="12">12 轮</option><option value="24">24 轮</option></select></label>
+      <label>效果<select id="effect"></select></label>
+      <label>处理轮数<select id="passes"><option value="1">1 轮</option><option value="4" selected>4 轮</option><option value="12">12 轮</option><option value="24">24 轮</option></select></label>
       <label>采样次数<select id="samples"><option value="15">15 次</option><option value="30" selected>30 次</option><option value="60">60 次</option></select></label>
       <button id="run" class="primary" disabled><i data-lucide="play"></i>开始测试</button>
       <button id="cancel" hidden><i data-lucide="square"></i>停止</button>
@@ -29,7 +30,7 @@
       <div><span class="eyebrow">RGBA 结果校验</span><strong id="validation" class="validation">待校验</strong><span id="validation-detail" class="muted">逐字节比较</span></div>
     </section>
     <section class="results" aria-labelledby="results-title">
-      <div class="section-heading"><h2 id="results-title">固定帧基准</h2><span id="test-meta" class="muted">3×3 均值模糊 · 保留边界与 Alpha</span></div>
+      <div class="section-heading"><h2 id="results-title">固定帧基准</h2><span id="test-meta" class="muted">均值模糊 · 3×3 卷积 · 保留边界与 Alpha</span></div>
       <div class="progress-track"><div id="progress"></div></div>
       <div class="table-scroll"><table>
         <thead><tr><th>实现</th><th>计算中位数</th><th>输入复制</th><th>输出复制</th><th>总耗时中位数</th><th>批均值 P95</th><th>校验</th></tr></thead>
@@ -46,7 +47,7 @@
         <label>管线<select id="live-pipeline"><option value="worker" selected>Worker · VideoFrame</option><option value="main">主线程 · Canvas</option></select></label>
         <button id="video-toggle"><i data-lucide="video"></i>开始实时</button>
         <button id="capture" disabled><i data-lucide="camera"></i>截取当前帧</button>
-        <label>实时滤镜<select id="live-mode"><option value="none">原始画面</option><option value="js">JavaScript</option><option value="scalar">Wasm · 标量</option><option value="simd" selected>Wasm · SIMD128</option></select></label>
+        <label>实时实现<select id="live-mode"><option value="none">原始画面</option><option value="js">JavaScript</option><option value="scalar">Wasm · 标量</option><option value="simd" selected>Wasm · SIMD128</option></select></label>
       </div></div>
       <div class="images"><figure><figcaption><span>输入</span><span id="source-name">示例图片</span></figcaption><div class="media-surface"><canvas id="input-canvas" width="1280" height="720"></canvas><video id="video" preload="metadata" muted loop playsinline src="assets/sample.mp4" hidden></video></div></figure>
       <figure><figcaption><span>处理结果</span><span id="preview-meta">等待测试</span></figcaption><div class="media-surface"><canvas id="output-canvas" width="1280" height="720"></canvas><canvas id="live-canvas" width="1280" height="720" hidden></canvas></div></figure></div>
@@ -58,7 +59,7 @@
       </div>
       <p class="note">取帧：VideoFrame 写入滤镜输入缓冲区（Wasm 模式下即 Wasm 线性内存）；处理：滤镜计算；输出：写入画布。三段均为管线所在线程的同步耗时，掉帧按帧时间戳或视频帧回调的 presentedFrames 统计。</p>
     </section>
-    <section class="history-section"><div class="section-heading"><h2>测试记录</h2><span class="muted">本次打开页面的最近 8 次</span></div><div class="table-scroll"><table><thead><tr><th>时间</th><th>输入尺寸</th><th>轮数</th><th>计算加速比</th><th>含复制加速比</th><th>校验</th><th>原始数据</th></tr></thead><tbody id="history"><tr><td colspan="7" class="empty">暂无记录</td></tr></tbody></table></div></section>
+    <section class="history-section"><div class="section-heading"><h2>测试记录</h2><span class="muted">本次打开页面的最近 8 次</span></div><div class="table-scroll"><table><thead><tr><th>时间</th><th>效果</th><th>输入尺寸</th><th>轮数</th><th>计算加速比</th><th>含复制加速比</th><th>校验</th><th>原始数据</th></tr></thead><tbody id="history"><tr><td colspan="8" class="empty">暂无记录</td></tr></tbody></table></div></section>
   </main>
 </body>
 </html>

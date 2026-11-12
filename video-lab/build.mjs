@@ -25,7 +25,7 @@ try {
       '-fno-exceptions', '-fno-rtti', '-fno-builtin', '-nostdlib',
       ...(simd ? ['-msimd128'] : []), '-c', join(root, 'native/benchmark.cc'), '-o', object]);
     run(linker, [...(linker.endsWith('rust-lld') ? ['-flavor', 'wasm'] : []),
-      '--no-entry', '--export=get_input', '--export=get_capacity',
+      '--no-entry', '--export=get_input', '--export=get_params', '--export=get_capacity',
       '--export=get_simd', '--export=process', '--initial-memory=33554432',
       '--max-memory=33554432', '--strip-all', object,
       '-o', join(root, `wasm/${name}.wasm`)]);
