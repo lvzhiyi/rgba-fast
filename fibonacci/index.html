@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Document</title>
+  </head>
+  <body>
+    <script>
+      function fibonacci(n) {
+        if (n < 0) throw new Error('输入的数字不能小于0');
+        if (n == 1 || n == 2) {
+          return 1;
+        } else {
+          return fibonacci(n - 1) + fibonacci(n - 2);
+        }
+      }
+      console.time('fibonacci JS');
+      fibonacci(45);
+      console.timeEnd('fibonacci JS');
+
+
+      // ==============
+      document.addEventListener('DOMContentLoaded', async () => {
+        let { instance } = await WebAssembly.instantiateStreaming(
+          fetch('http://127.0.0.1:5500/wasm/fibonacci/index.wasm'),
+          {}
+        );
+
+        console.log(instance);
+        let { fibonacci } = instance.exports;
+
+        console.time('fibonacci CC');
+        fibonacci(45);
+        console.timeEnd('fibonacci CC');
+      });
+    </script>
+  </body>
+</html>

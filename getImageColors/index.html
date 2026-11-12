@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>获取图片颜色种类</title>
+  </head>
+  <body>
+    <input type="file" onchange="fileChange(this)" />
+    <img width="300px" id="img" src="" alt="" />
+    <script>
+      // 平均色实验：上传图片 -> Canvas 读取 RGBA -> 分别求 RGB 平均值 -> 设置页面背景。
+      // 当前没有统计“颜色种类”；计算入口已切到 Wasm 草稿，但该函数尚未返回 RGB。
+      function fileChange(e) {
+        const fileReader = new FileReader();
+        fileReader.readAsDataURL(e.files[0]);
+        fileReader.onload = (e) => {
+          document.querySelector('#img').src = e.target.result;
+          // 固定等待 100ms 不保证图片加载完成，更可靠的做法是监听图片 load。
+          setTimeout(() => {
+            const rgb = getAverageRGB(document.getElementById('img'));
+            document.body.style.backgroundColor =
+              'rgb(' + rgb.r + ',' + rgb.g + ',' + rgb.b + ')';
+          }, 100);
+        };
+      }
+
+      function getAverageRGB(imgEl) {
+        // Canvas 使用 img 的显示尺寸（宽度 300px），不是原图的 naturalWidth / naturalHeight。
+        const canvas = document.createElement('canvas');
+        const context = canvas.getContext && canvas.getContext('2d');
+        let width;
+        let height;
+        console.log('canvas', imgEl.width);
+        const style = window.getComputedStyle(imgEl);
+        height = canvas.height = imgEl.height;
+        width = canvas.width = imgEl.width;
+
+        // 未指定缩放尺寸，原图会按原始尺寸绘制，超出 Canvas 的部分被裁掉。
+        context.drawImage(imgEl, 0, 0);
+
+        // data.data 默认按 [R, G, B, A, R, G, B, A, ...] 排列，每通道一个字节（0~255）。
+        let data = context.getImageData(0, 0, width, height);
+        // 此次漏传步长，i 会变为 NaN，循环不执行，返回值也没有使用。
+        averageImgData_js(data.data);
+        const start = performance.now();
+        // 当前 Wasm 函数返回 undefined；后续读取 rgb.r 会报错，需要完成异步结果回传后才能使用。
+        const res = averageImgData_c(data.data);
+        const end = performance.now();
+        console.log('js 计算时长：', ~~(end - start));
+        return res;
+      }
+
+      function averageImgData_js(data, averageSize) {
+        // 步长传 4 表示按像素累加 RGB，忽略 Alpha 透明度。
+        console.log(data.length);
+        let i = 0;
+        let count = 0;
+        const rgb = { r: 0, g: 0, b: 0 };
+        // 先递增再读取，会跳过第一个像素；此处保留原实验逻辑。
+        while ((i += averageSize) < data.length) {
+          ++count;
+          rgb.r += data[i];
+          rgb.g += data[i + 1];
+          rgb.b += data[i + 2];
+          // console.log(rgb);
+        }
+
+        // ~~ 把平均值转为整数，count 为 0 时也会把 NaN 转为 0。
+        rgb.r = ~~(rgb.r / count);
+        rgb.g = ~~(rgb.g / count);
+        rgb.b = ~~(rgb.b / count);
+
+        return rgb;
+      }
+
+      function averageImgData_c(data) {
+        // 未接通的 Wasm 草稿：只加载模块、打印内存，没有调用导出的计算函数，也没有返回结果。
+        // 每页内存为 64 KiB；shared 内存还要求浏览器满足跨源隔离条件。
+        const memory = new WebAssembly.Memory({
+          initial: 100,
+          maximum: 10000,
+          shared: true
+        });
+
+        const imgBuffer = new Uint8Array(memory.buffer);
+        // 复制 RGBA 字节；模块是否使用这块内存，取决于编译时的内存导入配置。
+        imgBuffer.set(data,0, data.length);
+
+        // 地址写死为 8080，与其他示例使用的 5500 端口不同。
+        WebAssembly.instantiateStreaming(
+          fetch('http://127.0.0.1:8080/index.wasm'),
+          { js: { mem: memory }, env: {
+            // 意图接收 C 回传的 RGB，但当前回调没有接收参数。
+            getRgb(){
+              console.log('getRgb')
+            }
+          } }
+        ).then((result) => {
+          console.log(
+            memory.buffer,
+            result.instance.exports.memory.buffer,
+            0,
+            data.length
+          );
+        });
+
+        // let r, g, b;
+        // WebAssembly.instantiateStreaming(
+        //   fetch('http://127.0.0.1:8080/index.wasm'),
+        //   {
+        //     env: {
+        //       getRgb: function (_r, _g, _b) {
+        //         r = _r;
+        //         g = _g;
+        //         b = _b;
+        //       },
+        //       memory: memory,
+        //       mem: memory,
+        //     },
+        //     memory: memory,
+        //     js: { mem: memory },
+        //   }
+        // )
+        //   .then((result) => {
+        //     console.log(result);
+        //     console.log(
+        //       memory.buffer,
+        //       result.instance.exports.memory.buffer,
+        //       0,
+        //       data.length
+        //     );
+        //     result.instance.exports.memory.grow(100);
+        //     const array = new Int32Array(
+        //       result.instance.exports.memory.buffer,
+        //       0,
+        //       data.length
+        //     );
+        //     console.log(data);
+        //     array.set(data);
+        //     result.instance.exports.averageImgData();
+        //     console.log(r, g, b);
+        //   })
+        //   .catch(console.error);
+      }
+    </script>
+  </body>
+</html>

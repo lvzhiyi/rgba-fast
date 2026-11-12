@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Document</title>
+</head>
+
+<body>
+  <script>
+
+    // C/Wasm 字符串回传实验，只输出到控制台，不参与图片模糊。
+    // 模块地址写死为 8080；源码与预编译 wasm 的对应关系仍需重新编译核实。
+    WebAssembly.instantiateStreaming(fetch(' http://127.0.0.1:8080/getstring.wasm'), {
+      env: {
+        // s 是 Wasm 内存地址，另外两个参数由 C 端定义；当前没有保存 s。
+        // index、size 未声明，严格模式下会报错。
+        getString: function (s, _index, _size) {
+          index = _index;
+          size = _size;
+
+        },
+      },
+    })
+      .then((result) => {
+        console.log(result);
+        // 占位参数：C 会把第一个 1 当作内存地址，而非实际的图片数组。
+        result.instance.exports.averageImgData(1, 1, 1);
+        let ss = '';
+        const buffer = new Uint8Array(result.instance.exports.memory.buffer);
+        console.log(buffer, index, size);
+        // 起点未使用回传的 s，终点写死为 16 + size，不能可靠定位字符串。
+        // 逐字节 fromCharCode 适用于 ASCII 尝试，不是通用 UTF-8 解码。
+        for (let i = index; i < 16 + size; ++i) {
+          console.log(buffer[i]);
+          ss += String.fromCharCode(buffer[i]);
+        }
+        console.log(ss);
+      })
+      .catch(console.error);
+
+  </script>
+</body>
+
+</html>

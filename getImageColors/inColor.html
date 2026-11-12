@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>模糊图片</title>
+  </head>
+  <body>
+    <input type="file" onchange="fileChange(this)" />
+    <button onclick="blueImg()">js 开始模糊</button>
+    <div>
+      <img width="300px" id="img" src="" alt="" />
+      <img width="300px" id="blueImg" src="" alt="" />
+    </div>
+    <script>
+      // 图片模糊的 JS 实验：上传原图 -> Canvas 读取 RGBA -> 修改通道数组 -> 显示结果。
+      // 此页面没有调用 WebAssembly；blueImg / blueCale 在这里表示模糊处理的尝试。
+      function fileChange(e) {
+        console.log(e.files[0]);
+        const fileReader = new FileReader();
+        fileReader.readAsDataURL(e.files[0]);
+        fileReader.onload = (e) => {
+          document.querySelector('#img').src = e.target.result;
+        };
+      }
+
+      function blueImg() {
+        // 按图片显示尺寸创建 Canvas，再把原图缩放绘制到该尺寸。
+        const canvas = document.createElement('canvas');
+        const context = canvas.getContext && canvas.getContext('2d');
+        const imgEl = document.querySelector('#img');
+        const blueImgEl = document.querySelector('#blueImg');
+        let width;
+        let height;
+        const style = window.getComputedStyle(imgEl);
+        height = canvas.height = imgEl.height;
+        width = canvas.width = imgEl.width;
+
+        context.drawImage(imgEl, 0, 0, width, height);
+        // data.data 默认每四个字节对应一个像素的 R、G、B、A，取值均为 0~255。
+        let data = context.getImageData(0, 0, width, height);
+        console.log('data', data);
+        // averageImgData_js(data.data);
+        const start = performance.now();
+        const blueData = averageImgData_js(data, width);
+        const end = performance.now();
+        console.log('js 计算时长：', ~~(end - start));
+        // 将修改后的字节数组还原为 ImageData，再导出 Data URL 显示到右侧图片。
+        const newImageData = new ImageData(blueData, width, height, {
+          colorSpace: data.colorSpace,
+        });
+        context.putImageData(newImageData, 0, 0);
+        blueImgEl.src = canvas.toDataURL();
+      }
+
+      function averageImgData_js(data, w) {
+        console.log(data.data);
+        const _data = [...data.data];
+        let i = 0;
+        // 当前只尝试处理前 910 个通道值，并非整张图；先 i++ 会跳过索引 0。
+        // 每次从已修改的 _data 截取输入，因此后续计算会受到前面结果影响。
+        while (i < _data.slice(0,910).length) {
+          i++;
+          _data[i] = blueCale(i, w, _data.slice(0,910));
+        }
+
+        console.log(_data);
+        // 转回像素字节数组：数值被限制到 0~255，NaN 转为 0。
+        return new Uint8ClampedArray(_data);
+      }
+
+      function blueCale(i, w, data) {
+        // 当前保留的是 R 通道（索引除以 4 余 0），不是 Alpha（余 3）。
+        if(i % 4===0) return data[i];
+        // 意图是九点均值模糊，但当前直接用通道索引，±1 会混入其他颜色通道。
+        // 同一通道的左右像素应相差 4、上下应相差 w * 4，且需按图像边界裁剪采样。
+        // i - w + 1 这一项还重复读取了 i - w - 1，以下保留原实验代码。
+        const averagePool = [
+          data[i],
+          i - 1 && data[i - 1],
+          i + 1 && data[i + 1],
+          i - w && data[i - w],
+          i + w && data[i + w],
+          i - w - 1 && data[i - w - 1],
+          i - w + 1 && data[i - w - 1],
+          i + w - 1 && data[i + w - 1],
+          i + w + 1 && data[i + w + 1],
+        ];
+
+        // 忽略 undefined 等假值后仍固定除以 9，缺失采样会拉低边界处的结果。
+        let sum = 0;
+        for (let i = 0; i < averagePool.length; i++) {
+          const element = averagePool[i];
+          sum = element ? ~~(element + sum) : sum;
+        }
+        return ~~(sum / 9);
+      }
+
+      function addValue(i, data) {
+        // 未使用的辅助函数；这里也会把合法的通道值 0 当成不存在。
+        if (!data[i]) return undefined;
+        return data[i];
+      }
+    </script>
+  </body>
+</html>

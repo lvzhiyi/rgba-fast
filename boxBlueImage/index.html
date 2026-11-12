@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Document</title>
+  <style>
+    canvas, .img  {
+      /* display: none; */
+      width: 500px;
+      height: 500px;
+      object-fit: cover;
+    }
+
+    .img{
+      /* display: none; */
+    }
+  </style>
+</head>
+
+<body>
+  <input type="file" name="img" onchange="fileChange(this)" id="" />
+  <button type="button" onclick="contrast(false)">js计算</button>
+  <button type="button" onclick="contrast(true)">webAssembly计算</button>
+  <div>
+    <canvas class="canvas"></canvas>
+  </div>
+  <div>
+    <img class="img" src="" alt="">
+  </div>
+  <script src="http://127.0.0.1:5500/wasm/boxBlueImage/convolution.js"></script>
+  <script>
+    const canvasNode = document.querySelector('.canvas');
+    const imgNode = document.querySelector('.img');
+    let context = canvasNode.getContext('2d');
+
+    const divider = 9;
+
+    const operator = [
+      -1,
+      -1,
+      -1,
+      -1,
+      8,
+      -1,
+      -1,
+      -1,
+      -1,
+    ];
+
+    let fileData;
+    async function fileChange(e) {
+      console.log(e.files[0]);
+      const fileArraybuffer = await readFile(e.files[0]);
+      const _fileData = new Uint8Array(fileArraybuffer);
+      // console.log('fileData', _fileData);
+      draw(e.files[0]);
+    }
+
+    function draw(file){
+      imgNode.src = window.URL.createObjectURL(file);
+
+      imgNode.onload = function () {
+        console.log(imgNode.width,imgNode.height);
+        canvasNode.setAttribute('height', imgNode.height);
+        canvasNode.setAttribute('width', imgNode.width);
+        context.drawImage(imgNode,0,0,imgNode.width,imgNode.height);
+      }
+    }
+
+    function drawNew(data){
+      context.putImageData(data, 0, 0);
+    }
+
+    function readFile(file) {
+      return new Promise((resolve, reject) => {
+        const fileReader = new FileReader();
+        fileReader.readAsArrayBuffer(file);
+        fileReader.onload = () => {
+          resolve(fileReader.result);
+        }
+      })
+    }
+
+    async function contrast(isWasm) {
+      let pixels = context.getImageData(0, 0, imgNode.width, imgNode.height);
+      console.log('getImageData', pixels);
+      let newData;
+      if(!isWasm){
+        performance.mark('jsStart');
+        // const testData = new Array(12 * 12).map((item, i) => i + 1);
+        // console.log('testData',testData);
+        let _outputData = context.createImageData(pixels.width, pixels.height)
+        newData = convolution(pixels, operator, _outputData);
+        console.log('newData',newData);
+        pixels.data.set(newData.data);
+        performance.mark('jsEnd')
+        performance.measure('jsStart to jsEnd', 'jsStart', 'jsEnd');
+        const entry = performance.getEntriesByName('jsStart to jsEnd')[0];
+        console.log('耗时：' + `${Math.floor(entry.duration)}`);
+      }else{
+        performance.mark('cStart');
+        newData = wasmContrast(pixels);
+        pixels.data.set(newData);
+        performance.mark('cEnd')
+        performance.measure('cStart to cEnd', 'cStart', 'cEnd');
+        const cEntry = performance.getEntriesByName('cStart to cEnd')[0];
+        console.log('cc耗时：' + `${Math.floor(cEntry.duration)}`);
+      }
+      drawNew(pixels);
+    }
+
+    let Unit8View, float32View, cppFilter, dataOffset, kernOffset;
+    function wasmContrast (pixelData) {
+      const { data, width, height } = pixelData;
+      const arLen = pixelData.data.length;
+
+      Unit8View.set(data, dataOffset);
+      cppFilter(width, height);
+
+      return Unit8View.subarray(dataOffset, dataOffset + arLen);
+    }
+
+    document.addEventListener('DOMContentLoaded', async () => {
+      let { instance } = await WebAssembly.instantiateStreaming(
+        fetch('http://127.0.0.1:5500/wasm/boxBlueImage/convolution.wasm'),{
+        }
+      );
+      let { cppConvFilter, cppGetkernelPtr, cppGetDataPtr, memory } =
+        instance.exports;
+
+      // image data 指针位置（偏移量）
+      dataOffset = cppGetDataPtr();
+      // kernel 指针位置（偏移量）
+      kernOffset = cppGetkernelPtr();
+
+      Unit8View = new Uint8Array(memory.buffer);
+      float32View = new Float32Array(memory.buffer);
+      cppFilter = cppConvFilter;
+
+      float32View.set(operator, kernOffset / 4);
+    });
+  </script>
+</body>
+
+</html>

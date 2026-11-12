@@ -1,0 +1,9 @@
+{
+  "name": "rgba-wasm-benchmark",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "test": "node --test tests/benchmark.test.mjs"
+  }
+}

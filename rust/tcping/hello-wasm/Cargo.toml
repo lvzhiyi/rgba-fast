@@ -1,0 +1,23 @@
+[package]
+name = "Speedtest-wasm"
+version = "0.1.0"
+authors = ["lvzhiyi@tinman.cn"]
+description = "A sample project with wasm-pack"
+license = "MIT/Apache-2.0"
+edition = "2021"
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wasm-bindgen = "0.2"
+tokio = { version = "1", features = ["full","sync", "rt"] }
+mio = { version = "0.8", features = ["os-poll", "os-ext", "net"] }
+structopt = "0.3.21"
+wasm-bindgen-futures = "0.4.34"
+
+[dependencies.web-sys]
+version = "0.3"
+features = [
+  "Window",
+  "console"
+]
