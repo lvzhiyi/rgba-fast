@@ -1,4 +1,5 @@
 import { JSProcessor, loadWasm } from './kernels.js';
+import { LiveMeter, coverRect } from './live-stats.js';
 
 const $ = id => document.getElementById(id);
 const inputCanvas = $('input-canvas');
@@ -7,11 +8,13 @@ const inputContext = inputCanvas.getContext('2d', { willReadFrequently: true });
 const outputContext = outputCanvas.getContext('2d');
 const video = $('video');
 const names = { js: 'JavaScript', scalar: 'Wasm · 标量', simd: 'Wasm · SIMD128' };
-let sourceImage, frame, worker, liveEngines, liveOutput, previousTime, lastResult;
+let sourceImage, frame, worker, liveEngines, liveOutput, lastResult;
+let pipeline, liveStream, captureStream, workerTrack, cancelFrame, lastPresented, liveKind;
 let busy = false;
 let playing = false;
-let animation;
-let liveRecords = [];
+let lastLiveStats = 0;
+let liveTotals = { frames: 0, dropped: 0 };
+const liveMeter = new LiveMeter();
 let liveToken = 0;
 let sourceToken = 0;
 let frameRevision = 0;
@@ -31,7 +34,7 @@ function setBusy(value) {
   busy = value;
   $('run').disabled = value || !frame;
   $('cancel').hidden = !value;
-  for (const id of ['resolution', 'passes', 'samples', 'upload', 'capture', 'video-toggle', 'live-mode']) {
+  for (const id of ['resolution', 'passes', 'samples', 'upload', 'capture', 'video-toggle', 'live-mode', 'live-source', 'live-pipeline']) {
     $(id).disabled = value || (id === 'capture' && !playing);
   }
   document.querySelector('.file-button').classList.toggle('disabled', value);
@@ -70,18 +73,28 @@ function resetResults() {
 function stopVideo() {
   playing = false;
   liveToken++;
-  cancelAnimationFrame(animation);
+  cancelFrame?.();
+  cancelFrame = undefined;
+  if (pipeline) {
+    pipeline.worker.postMessage({ type: 'stop' });
+    pipeline.session = undefined;
+  }
+  // 释放本次打开的摄像头、captureStream 轨道和转给 Worker 的轨道副本。
+  for (const stream of [liveStream, captureStream]) stream?.getTracks().forEach(track => track.stop());
+  workerTrack?.stop();
+  liveStream = captureStream = workerTrack = undefined;
   video.pause();
+  video.srcObject = null;
   video.hidden = true;
   inputCanvas.hidden = false;
+  outputCanvas.hidden = false;
+  $('live-canvas').hidden = true;
   // 实时视频会改写输入 Canvas；暂停后还原固定截图，避免预览与基准输入不一致。
   if (frame) inputContext.putImageData(frame, 0, 0);
-  $('video-toggle').innerHTML = '<i data-lucide="video"></i>播放视频';
+  $('video-toggle').innerHTML = '<i data-lucide="video"></i>开始实时';
   $('capture').disabled = true;
   $('video-toggle').disabled = busy;
-  $('live-state').textContent = '视频已暂停';
-  previousTime = undefined;
-  liveRecords = [];
+  $('live-state').textContent = '实时处理已停止';
   window.lucide?.createIcons();
 }
 
@@ -230,13 +243,60 @@ async function prepareLive(token) {
   return true;
 }
 
-function drawVideo(now) {
+// 优先按视频帧回调调度（可得到精确的 presentedFrames），不支持时退回 rAF。
+function scheduleFrame(callback) {
+  if (video.requestVideoFrameCallback) {
+    const id = video.requestVideoFrameCallback(callback);
+    return () => video.cancelVideoFrameCallback(id);
+  }
+  const id = requestAnimationFrame(callback);
+  return () => cancelAnimationFrame(id);
+}
+
+// 视频帧回调相邻两次之间跳过的帧数即为掉帧。
+function missedFrames(metadata) {
+  const presented = metadata?.presentedFrames;
+  const missed = presented !== undefined && lastPresented !== undefined ? Math.max(0, presented - lastPresented - 1) : 0;
+  lastPresented = presented;
+  return missed;
+}
+
+function renderLive(summary) {
+  liveTotals.frames += summary.frames;
+  liveTotals.dropped += summary.dropped;
+  const ms = segment => segment.mean.toFixed(2);
+  $('live-copy').textContent = ms(summary.copyIn);
+  $('live-process').textContent = ms(summary.process);
+  $('live-output').textContent = ms(summary.output);
+  $('live-total').textContent = ms(summary.total);
+  $('live-p95').textContent = summary.total.p95.toFixed(2);
+  $('live-fps').textContent = summary.fps?.toFixed(1) ?? '--';
+  const rate = liveTotals.dropped / (liveTotals.frames + liveTotals.dropped);
+  $('live-drop').textContent = `${liveTotals.dropped} · ${(rate * 100).toFixed(1)}%`;
+  $('live-path').textContent = summary.path;
+  if (summary.fallbackReason) $('live-path').title = summary.fallbackReason;
+}
+
+function resetLiveStats() {
+  liveMeter.reset();
+  liveTotals = { frames: 0, dropped: 0 };
+  lastPresented = undefined;
+  for (const id of ['live-copy', 'live-process', 'live-output', 'live-total', 'live-p95', 'live-fps', 'live-drop', 'live-path']) {
+    $(id).textContent = '--';
+  }
+  $('live-path').removeAttribute('title');
+}
+
+// 主线程对照管线：drawImage → getImageData → 滤镜 → putImageData，全部占用主线程。
+function drawVideo(now, metadata) {
   if (!playing) return;
-  const start = performance.now();
+  liveMeter.drop(missedFrames(metadata));
   const { width, height, passes } = config();
-  inputContext.drawImage(video, 0, 0, width, height);
+  const start = performance.now();
+  const rect = coverRect(video.videoWidth, video.videoHeight, width, height);
+  inputContext.drawImage(video, rect.x, rect.y, rect.width, rect.height, 0, 0, width, height);
   const pixels = inputContext.getImageData(0, 0, width, height);
-  const filterStart = performance.now();
+  const copied = performance.now();
   const mode = $('live-mode').value;
   const engine = liveEngines[mode];
   if (mode === 'none') liveOutput.data.set(pixels.data);
@@ -246,22 +306,133 @@ function drawVideo(now) {
     engine.prepare(pixels.data);
     liveOutput.data.set(engine.run(passes));
   }
-  const filterEnd = performance.now();
+  const processed = performance.now();
   outputContext.putImageData(liveOutput, 0, 0);
   const end = performance.now();
-  // 实际 FPS 使用相邻回调间隔，另列滤镜耗时及包含 Canvas 操作的整帧耗时。
-  liveRecords.push({ filter: filterEnd - filterStart, frame: end - start,
-    interval: previousTime === undefined ? null : now - previousTime });
-  previousTime = now;
-  if (liveRecords.length >= 15) {
-    const mean = key => liveRecords.reduce((sum, row) => sum + row[key], 0) / liveRecords.length;
-    const intervals = liveRecords.filter(row => row.interval !== null);
-    $('live-filter').textContent = mean('filter').toFixed(2);
-    $('live-frame').textContent = mean('frame').toFixed(2);
-    $('live-fps').textContent = intervals.length ? (1000 * intervals.length / intervals.reduce((sum, row) => sum + row.interval, 0)).toFixed(1) : '--';
-    liveRecords = [];
+  liveMeter.add({ copyIn: copied - start, process: processed - copied, output: end - processed, total: end - start });
+  if (end - lastLiveStats >= 500) {
+    lastLiveStats = end;
+    renderLive({ ...liveMeter.summary(), path: '主线程 Canvas' });
+    liveMeter.next();
   }
-  animation = requestAnimationFrame(drawVideo);
+  cancelFrame = scheduleFrame(drawVideo);
+}
+
+function onPipelineMessage({ data }) {
+  if (data.type === 'caps') pipeline.resolveCaps(data);
+  else if (data.type === 'started' || (data.type === 'error' && pipeline.pending)) {
+    pipeline.pending?.(data);
+    pipeline.pending = undefined;
+  } else if (data.type === 'ready') {
+    if (data.session === pipeline.session) pipeline.inFlight = false;
+  } else if (data.type === 'stats') {
+    if (playing && liveKind === 'worker') renderLive(data);
+  } else if (data.type === 'error' && playing) {
+    stopVideo();
+    status(`实时管线错误：${data.message}`, true);
+  }
+}
+
+// Worker 管线只创建一次：输出 Canvas 转为 OffscreenCanvas 后，主线程不再触碰像素。
+function getPipeline() {
+  if (pipeline) return pipeline;
+  const worker = new Worker(new URL('./pipeline-worker.js', import.meta.url), { type: 'module' });
+  pipeline = { worker, inFlight: false };
+  pipeline.caps = new Promise(resolve => { pipeline.resolveCaps = resolve; });
+  worker.onmessage = onPipelineMessage;
+  worker.onerror = event => {
+    if (playing) { stopVideo(); status(`实时管线错误：${event.message}`, true); }
+  };
+  const offscreen = $('live-canvas').transferControlToOffscreen();
+  worker.postMessage({ type: 'init', canvas: offscreen }, [offscreen]);
+  return pipeline;
+}
+
+function startPipeline(message, transfer) {
+  return new Promise((resolve, reject) => {
+    pipeline.pending = data => data.type === 'started' ? resolve(data) : reject(new Error(data.message));
+    pipeline.worker.postMessage(message, transfer);
+  });
+}
+
+// 回退路径：浏览器没有 MediaStreamTrackProcessor 时，主线程按视频帧回调构造 VideoFrame 并转移给 Worker，
+// Worker 未处理完时直接跳过当前帧，掉帧数随下一帧带过去。
+function sendFrames(token, session) {
+  let missed = 0;
+  const step = (now, metadata) => {
+    if (token !== liveToken) return;
+    missed += missedFrames(metadata);
+    if (pipeline.inFlight) missed++;
+    else {
+      const frame = new VideoFrame(video);
+      pipeline.inFlight = true;
+      pipeline.worker.postMessage({ type: 'frame', frame, session, missed }, [frame]);
+      missed = 0;
+    }
+    cancelFrame = scheduleFrame(step);
+  };
+  cancelFrame = scheduleFrame(step);
+}
+
+async function startWorkerPipeline(token) {
+  const { width, height, passes } = config();
+  const { mstp } = await getPipeline().caps;
+  const stream = liveStream || video.captureStream?.() || video.mozCaptureStream?.();
+  if (!liveStream && stream) captureStream = stream;
+  const track = stream?.getVideoTracks()[0];
+  const message = { type: 'start', width, height, passes, mode: $('live-mode').value,
+    frameRate: track?.getSettings().frameRate };
+  let source = 'frames';
+  let transfer = [];
+  if (track && window.MediaStreamTrackProcessor) {
+    // Chrome：主线程创建处理器，只把 ReadableStream<VideoFrame> 转移给 Worker。
+    workerTrack = track.clone();
+    message.readable = new MediaStreamTrackProcessor({ track: workerTrack, maxBufferSize: 1 }).readable;
+    transfer = [message.readable];
+    source = 'MediaStreamTrackProcessor';
+  } else if (track && mstp) {
+    // Safari 等只在 Worker 中提供处理器：把轨道副本转移过去，在 Worker 内创建。
+    workerTrack = track.clone();
+    message.track = workerTrack;
+    transfer = [workerTrack];
+    source = 'MediaStreamTrackProcessor（Worker）';
+  }
+  let started;
+  try {
+    started = await startPipeline(message, transfer);
+  } catch (error) {
+    if (!message.track || error.name !== 'DataCloneError') throw error;
+    // 轨道不可转移时退回逐帧转移。
+    delete message.track;
+    source = 'frames';
+    started = await startPipeline(message, []);
+  }
+  if (token !== liveToken) return false;
+  pipeline.session = started.session;
+  pipeline.inFlight = false;
+  if (!started.simd && $('live-mode').value === 'simd') {
+    $('live-mode').value = 'scalar';
+    pipeline.worker.postMessage({ type: 'mode', mode: 'scalar' });
+  }
+  if (source === 'frames') sendFrames(token, started.session);
+  $('live-source-path').textContent = source === 'frames' ? '逐帧转移 VideoFrame' : source;
+  return true;
+}
+
+async function openSource(token) {
+  if ($('live-source').value === 'camera') {
+    if (!navigator.mediaDevices?.getUserMedia) throw new Error('当前环境不支持摄像头');
+    const { width, height } = config();
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: false,
+      video: { width: { ideal: width }, height: { ideal: height }, frameRate: { ideal: 30 } } });
+    if (token !== liveToken) { stream.getTracks().forEach(track => track.stop()); return false; }
+    liveStream = stream;
+    video.srcObject = stream;
+  } else {
+    video.srcObject = null;
+  }
+  await video.play();
+  return token === liveToken;
 }
 
 $('video-toggle').addEventListener('click', async () => {
@@ -269,21 +440,30 @@ $('video-toggle').addEventListener('click', async () => {
   const token = ++liveToken;
   $('video-toggle').disabled = true;
   try {
-    if (!await prepareLive(token)) return;
-    await video.play();
-    if (token !== liveToken || busy) return;
+    liveKind = $('live-pipeline').value;
+    if (liveKind === 'main' && !await prepareLive(token)) return;
+    if (!await openSource(token) || busy) return;
+    resetLiveStats();
+    lastLiveStats = performance.now();
+    if (liveKind === 'worker') {
+      if (!await startWorkerPipeline(token)) return;
+      outputCanvas.hidden = true;
+      $('live-canvas').hidden = false;
+    } else {
+      $('live-source-path').textContent = 'requestVideoFrameCallback';
+    }
     playing = true;
     video.hidden = false;
     inputCanvas.hidden = true;
-    $('video-toggle').innerHTML = '<i data-lucide="pause"></i>暂停视频';
+    $('video-toggle').innerHTML = '<i data-lucide="pause"></i>停止实时';
     $('capture').disabled = false;
-    $('live-state').textContent = '视频播放中';
-    $('preview-meta').textContent = '实时滤镜';
-    animation = requestAnimationFrame(drawVideo);
+    $('live-state').textContent = $('live-source').value === 'camera' ? '摄像头实时处理中' : '视频实时处理中';
+    $('preview-meta').textContent = liveKind === 'worker' ? '实时滤镜 · Worker' : '实时滤镜 · 主线程';
+    if (liveKind === 'main') cancelFrame = scheduleFrame(drawVideo);
     window.lucide?.createIcons();
   } catch (error) {
     if (token === liveToken) {
-      status(`视频启动失败：${error.message}`, true);
+      status(`实时处理启动失败：${error.message}`, true);
       stopVideo();
     }
   } finally {
@@ -292,13 +472,18 @@ $('video-toggle').addEventListener('click', async () => {
 });
 
 $('live-mode').addEventListener('change', () => {
-  previousTime = undefined;
-  liveRecords = [];
-  for (const id of ['live-filter', 'live-frame', 'live-fps']) $(id).textContent = '--';
+  if (playing && liveKind === 'worker') pipeline.worker.postMessage({ type: 'mode', mode: $('live-mode').value });
+  resetLiveStats();
+  lastLiveStats = performance.now();
 });
+
+for (const id of ['live-source', 'live-pipeline']) {
+  $(id).addEventListener('change', () => { if (playing) stopVideo(); });
+}
 
 $('capture').addEventListener('click', () => {
   if (!playing) return;
+  const label = video.srcObject ? '摄像头截帧' : `视频截帧 ${video.currentTime.toFixed(2)}s`;
   fitSource(video);
   stopVideo();
   // 同步保留截图，避免异步图片解码期间发生参数切换。
@@ -308,7 +493,7 @@ $('capture').addEventListener('click', () => {
   snapshot.getContext('2d').drawImage(inputCanvas, 0, 0);
   sourceImage = snapshot;
   resetResults();
-  $('source-name').textContent = `视频截帧 ${video.currentTime.toFixed(2)}s`;
+  $('source-name').textContent = label;
   status('已截取固定帧');
 });
 

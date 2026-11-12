@@ -42,13 +42,21 @@
     <section class="preview" aria-labelledby="preview-title">
       <div class="section-heading"><h2 id="preview-title">图像与视频</h2><div class="preview-actions">
         <label class="file-button" for="upload" tabindex="0"><i data-lucide="image-up"></i>选择图片</label><input type="file" id="upload" accept="image/*" hidden>
-        <button id="video-toggle"><i data-lucide="video"></i>播放视频</button>
+        <label>输入源<select id="live-source"><option value="file">示例视频</option><option value="camera">摄像头</option></select></label>
+        <label>管线<select id="live-pipeline"><option value="worker" selected>Worker · VideoFrame</option><option value="main">主线程 · Canvas</option></select></label>
+        <button id="video-toggle"><i data-lucide="video"></i>开始实时</button>
         <button id="capture" disabled><i data-lucide="camera"></i>截取当前帧</button>
         <label>实时滤镜<select id="live-mode"><option value="none">原始画面</option><option value="js">JavaScript</option><option value="scalar">Wasm · 标量</option><option value="simd" selected>Wasm · SIMD128</option></select></label>
       </div></div>
       <div class="images"><figure><figcaption><span>输入</span><span id="source-name">示例图片</span></figcaption><div class="media-surface"><canvas id="input-canvas" width="1280" height="720"></canvas><video id="video" preload="metadata" muted loop playsinline src="assets/sample.mp4" hidden></video></div></figure>
-      <figure><figcaption><span>处理结果</span><span id="preview-meta">等待测试</span></figcaption><div class="media-surface"><canvas id="output-canvas" width="1280" height="720"></canvas></div></figure></div>
-      <div class="live-stats"><span>滤镜耗时 <b id="live-filter">--</b> ms</span><span>整帧处理 <b id="live-frame">--</b> ms</span><span>实际回调 <b id="live-fps">--</b> FPS</span><span id="live-state" class="muted">视频已暂停</span></div>
+      <figure><figcaption><span>处理结果</span><span id="preview-meta">等待测试</span></figcaption><div class="media-surface"><canvas id="output-canvas" width="1280" height="720"></canvas><canvas id="live-canvas" width="1280" height="720" hidden></canvas></div></figure></div>
+      <div class="live-stats" aria-label="实时管线统计">
+        <span>取帧 <b id="live-copy">--</b> ms</span><span>处理 <b id="live-process">--</b> ms</span><span>输出 <b id="live-output">--</b> ms</span>
+        <span>整帧 <b id="live-total">--</b> ms</span><span>整帧 P95 <b id="live-p95">--</b> ms</span><span>处理帧率 <b id="live-fps">--</b> FPS</span>
+        <span>掉帧 <b id="live-drop">--</b></span><span>取帧路径 <b id="live-path">--</b></span><span>帧来源 <b id="live-source-path">--</b></span>
+        <span id="live-state" class="muted">实时处理已停止</span>
+      </div>
+      <p class="note">取帧：VideoFrame 写入滤镜输入缓冲区（Wasm 模式下即 Wasm 线性内存）；处理：滤镜计算；输出：写入画布。三段均为管线所在线程的同步耗时，掉帧按帧时间戳或视频帧回调的 presentedFrames 统计。</p>
     </section>
     <section class="history-section"><div class="section-heading"><h2>测试记录</h2><span class="muted">本次打开页面的最近 8 次</span></div><div class="table-scroll"><table><thead><tr><th>时间</th><th>输入尺寸</th><th>轮数</th><th>计算加速比</th><th>含复制加速比</th><th>校验</th><th>原始数据</th></tr></thead><tbody id="history"><tr><td colspan="7" class="empty">暂无记录</td></tr></tbody></table></div></section>
   </main>
