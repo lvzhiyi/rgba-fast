@@ -1,3 +1,8 @@
+// C++ 版效果引擎，编译成 Wasm 供浏览器调用。同一份源码编两次（见 build.mjs）：
+//   不加 -msimd128 → 标量版，#ifdef __wasm_simd128__ 里的代码全部不参与编译；
+//   加上 -msimd128 → SIMD 版，编译器定义 __wasm_simd128__，启用一次处理 4 个像素的快速路径。
+// 与 JS 的约定：JS 先通过 get_input / get_params 拿到地址，把像素和参数写进去，再调用 process。
+// assembly/effects.ts 是这份代码的 AssemblyScript 逐行移植，两边要一起改。
 #ifdef __wasm_simd128__
 #include <wasm_simd128.h>
 #endif
@@ -30,6 +35,8 @@ static int params[PARAM_COUNT] = {KIND_CONVOLUTION, 16,
 //   GENERAL：其余情况用 32 位累加
 enum Path { UNIFORM, SMALL, GENERAL };
 
+// 卷积核里非零权重的邻居（“抽头”）。offset 是相对当前通道的字节偏移，
+// 例如右上邻居 = -stride + 4。跳过零权重后，锐化核只需算 5 个而不是 9 个。
 struct Taps {
   int count;
   int offset[9];
@@ -37,6 +44,7 @@ struct Taps {
   Path path;
 };
 
+// 取绝对值并放大到 64 位，用于溢出估算时自身不会溢出。
 static long long magnitude(int value) { return value < 0 ? -(long long)value : value; }
 
 // 检查参数能否在 32 位整数内无溢出地累加；非法参数让 process 返回空指针。
@@ -111,6 +119,7 @@ static void convolve_pixel(const unsigned char *src, unsigned char *dst, int p, 
   dst[p + 3] = src[p + 3];
 }
 
+// 标量颜色矩阵：处理从字节 p 开始的一个像素。
 static void color_pixel(const unsigned char *src, unsigned char *dst, int p, int shift) {
   const int r = src[p], g = src[p + 1], b = src[p + 2];
   for (int channel = 0; channel < 3; ++channel) {
@@ -122,6 +131,9 @@ static void color_pixel(const unsigned char *src, unsigned char *dst, int p, int
 
 #ifdef __wasm_simd128__
 // 一次处理四个 RGBA 像素（16 个通道），先把 u8 扩展到 16 位。
+// v128_t 是 128 位向量，可看成 16 个 u8 / 8 个 i16 / 4 个 i32，一条指令同时算其中每一格。
+// Alpha 通道会被一起算出无意义的值，所以最后用 finish_alpha 按位选择：
+// 掩码 0x00ffffff 为 1 的位（每像素低 3 字节 = RGB）取计算结果，为 0 的位（Alpha）取原值。
 static v128_t finish_alpha(v128_t rgb, const unsigned char *src, int p) {
   return wasm_v128_bitselect(rgb, wasm_v128_load(src + p), wasm_i32x4_splat(0x00ffffff));
 }
@@ -181,10 +193,12 @@ static void convolve_four(const unsigned char *src, unsigned char *dst, int p, c
 static void color_four(const unsigned char *src, unsigned char *dst, int p, int shift) {
   const v128_t value = wasm_v128_load(src + p);
   const v128_t zero = wasm_i32x4_splat(0);
+  // shuffle 按下标挑字节：0..15 取 value，16 取 zero 的 0。r 取第 0、4、8、12 字节（四个像素的 R）并补零成 i32。
   const v128_t r = wasm_i8x16_shuffle(value, zero, 0, 16, 16, 16, 4, 16, 16, 16, 8, 16, 16, 16, 12, 16, 16, 16);
   const v128_t g = wasm_i8x16_shuffle(value, zero, 1, 16, 16, 16, 5, 16, 16, 16, 9, 16, 16, 16, 13, 16, 16, 16);
   const v128_t b = wasm_i8x16_shuffle(value, zero, 2, 16, 16, 16, 6, 16, 16, 16, 10, 16, 16, 16, 14, 16, 16, 16);
   const v128_t max = wasm_i32x4_splat(255);
+  // 先只保留 Alpha 字节（小端序下每个 i32 的最高字节），R / G / B 算好后逐个“或”进对应字节位置。
   v128_t result = wasm_v128_and(value, wasm_i32x4_splat((int)0xff000000));
   for (int channel = 0; channel < 3; ++channel) {
     const int *m = params + 2 + channel * 4;
@@ -206,6 +220,7 @@ static void convolve(const unsigned char *src, unsigned char *dst, int width, in
   const int shift = params[1];
   const Taps taps = build_taps(stride);
   const int *weights = params + 2;
+  // 九个邻居相对当前通道的字节偏移，顺序与权重一致：左上、正上、右上、正左、自己、正右、左下、正下、右下。
   const int offsets[9] = {-stride - 4, -stride, -stride + 4, -4, 0, 4, stride - 4, stride, stride + 4};
   // 保留最外围一圈像素和所有 Alpha，内部 RGB 做 3x3 整数卷积。
   for (int i = 0; i < stride; ++i) {
@@ -219,6 +234,7 @@ static void convolve(const unsigned char *src, unsigned char *dst, int width, in
       dst[row + stride - 4 + c] = src[row + stride - 4 + c];
     }
     int x = 1;
+    // SIMD 版先每次推进 4 个像素，剩下凑不满 4 个的尾巴交给标量逐个处理；标量版直接全部走下面的循环。
 #ifdef __wasm_simd128__
     for (; x + 3 < width - 1; x += 4) convolve_four(src, dst, row + x * 4, taps, bias, shift);
 #endif
@@ -236,6 +252,9 @@ static void color(const unsigned char *src, unsigned char *dst, int width, int h
   for (; p < size; p += 4) color_pixel(src, dst, p, shift);
 }
 
+// ---- 导出给 JS 的接口 ----
+// extern "C" 关掉 C++ 的函数名改编（name mangling），导出名就是这里写的名字。
+// 返回的指针在 Wasm 里就是一个 32 位整数：它在线性内存里的字节偏移。
 extern "C" {
 unsigned char *get_input() { return input; }
 int *get_params() { return params; }
@@ -253,6 +272,7 @@ unsigned char *process(int width, int height, int passes) {
   if (width < 1 || height < 1 || width > 1920 || height > 1080 || passes < 1 || passes > 32 ||
       !valid_params())
     return nullptr;
+  // 双缓冲：第一轮 input → work_a，第二轮 work_a → work_b，第三轮 work_b → work_a……input 本身从不被改写。
   const unsigned char *src = input;
   unsigned char *dst = work_a;
   for (int pass = 0; pass < passes; ++pass) {

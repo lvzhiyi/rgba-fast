@@ -2,6 +2,15 @@
 // 这样 JS、标量 Wasm、SIMD Wasm 三条实现可以逐字节一致。
 // convolution：3x3 卷积，weights 为九个权重（行优先），保留最外围一圈像素；
 // color：颜色矩阵，matrix 为三行 [r, g, b, bias]，逐像素作用于全部像素。Alpha 始终不变。
+//
+// 为什么用 shift 而不用小数：想乘 0.299 时，改成乘 77 再右移 8 位（÷256），77/256 ≈ 0.301。
+// 整数运算在 JS、C++、SIMD 里结果完全确定；浮点数则可能因舍入顺序不同而差 1。
+// 右移是向下取整，例如 -3 >> 1 = -2；三种实现都遵守同一规则，所以能逐字节对上。
+//
+// 卷积权重排列（行优先）：        对应像素位置：
+//   [w0 w1 w2                       左上 正上 右上
+//    w3 w4 w5                       正左 自己 正右
+//    w6 w7 w8]                      左下 正下 右下
 export const EFFECTS = {
   box: { name: '均值模糊', kind: 'convolution', weights: Array(9).fill(7282), bias: 0, shift: 16,
     note: '九点均值；(sum × 7282) >> 16 与 floor(sum / 9) 完全一致' },
@@ -24,10 +33,11 @@ export const EFFECTS = {
 };
 
 export const DEFAULT_EFFECT = 'box';
-export const PARAM_COUNT = 16;
-const WEIGHT_LIMIT = 32767;
-const SUM_LIMIT = 2147483647;
+export const PARAM_COUNT = 16;      // Wasm 侧 params 数组长度（实际最多用到 14 个）
+const WEIGHT_LIMIT = 32767;         // 16 位有符号整数上限：SIMD 卷积把权重当 i16 参与乘法
+const SUM_LIMIT = 2147483647;       // 32 位有符号整数上限：累加结果不能超过它
 
+// 按 id 取效果定义，id 不存在时抛错（防止界面传来未知值）。
 export function getEffect(id) {
   const effect = EFFECTS[id];
   if (!effect) throw new RangeError(`未知效果：${id}`);
@@ -35,6 +45,7 @@ export function getEffect(id) {
 }
 
 // 与 C++ valid_params 相同的约束：权重可放进 16 位有符号数，累加不超出 32 位有符号整数。
+// 估算方法：假设每个像素都取最大值 255，|bias| + Σ(|权重| × 255) 就是累加可能达到的最大绝对值。
 export function validateEffect(effect) {
   const integers = values => values.every(Number.isInteger);
   if (!Number.isInteger(effect.shift) || effect.shift < 0 || effect.shift > 30) throw new RangeError('shift 须为 0–30 的整数');
@@ -54,7 +65,10 @@ export function validateEffect(effect) {
   return effect;
 }
 
-// 按 C++ params 布局编码。
+// 按 C++ params 布局编码成 Int32Array，WasmProcessor.setEffect 会把它整体写进 Wasm 内存：
+//   [0] 类型（0 卷积 / 1 颜色矩阵）  [1] shift
+//   卷积：[2..10] 九个权重  [11] bias
+//   颜色：[2..13] 三行 [r, g, b, bias]
 export function encodeEffect(effect) {
   validateEffect(effect);
   const params = new Int32Array(PARAM_COUNT);

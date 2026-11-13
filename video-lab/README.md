@@ -1,6 +1,6 @@
 # video-lab：前端实时视频处理性能实验
 
-对同一帧 RGBA 图像执行同一种整数图像效果（3×3 卷积或颜色矩阵，共 9 种），比较 **JavaScript / 标量 Wasm / SIMD128 Wasm** 三条路径的性能，
+对同一帧 RGBA 图像执行同一种整数图像效果（3×3 卷积或颜色矩阵，共 9 种），比较 **JavaScript** 与四个 Wasm 构建（**C++ / AssemblyScript** × **标量 / SIMD128**）共五条路径的性能，
 并支持视频 / 摄像头逐帧实时滤镜：默认走 Worker 端 VideoFrame 管线，可切换到主线程 Canvas 管线作对照。
 
 ## 启动
@@ -20,7 +20,7 @@ npm run dev
 video-lab/
 ├── index.html / style.css    页面
 ├── serve.mjs                 本地静态服务
-├── build.mjs                 编译 native/ → wasm/
+├── build.mjs                 编译 native/ 与 assembly/ → wasm/
 ├── src/
 │   ├── app.js                界面、视频实时滤镜、历史与导出
 │   ├── effects.js            效果表：卷积核 / 颜色矩阵的整数参数、校验与编码
@@ -29,14 +29,16 @@ video-lab/
 │   ├── pipeline-worker.js    实时管线：VideoFrame → Wasm 内存 → 滤镜 → OffscreenCanvas
 │   └── live-stats.js         实时分段计量、掉帧估算、cover 裁剪
 ├── native/benchmark.cc       C++ 计算核心（标量 + SIMD128）
-├── wasm/                     编译产物 benchmark-{scalar,simd}.wasm
+├── assembly/effects.ts       AssemblyScript 计算核心（与 C++ 同一算法、同一内存布局）
+├── wasm/                     编译产物 benchmark-{scalar,simd}.wasm（C++）、
+│                             assemblyscript-{scalar,simd}.wasm（AssemblyScript）
 ├── assets/                   示例图片、视频、图标库
 └── tests/                    node:test 单元测试
 ```
 
 ## 测量口径
 
-- JS、标量 Wasm、SIMD Wasm 对同一份固定 RGBA 输入执行相同效果、相同轮数的整数处理。
+- 五条路径对同一份固定 RGBA 输入执行相同效果、相同轮数的整数处理。
 - 每轮保留边界和 Alpha；使用独立输入与交替输出，避免就地修改造成结果差异。
 - 模块加载、编译、缓冲区分配和像素校验均在计时前完成。
 - 每条路径预热 12 次，在独立 Worker 中轮换测试顺序，报告中位数和最近秩法 P95。
@@ -46,12 +48,12 @@ video-lab/
 - 总耗时不包含视频解码和 Canvas 绘制，视频模式另列实际回调 FPS、滤镜和整帧耗时。
 - 所有已加载实现的输出必须逐字节一致才能生成性能报告；SIMD 不可用时仍可测标量。
 - 导出的 JSON 包含参数、浏览器、校验、每次原始采样和统计；加速比小于 1 表示 Wasm 更慢。
-- 处理轮数对三条路径同时生效，代表连续多轮处理，不是只给 JS 增加工作量。
+- 处理轮数对所有路径同时生效，代表连续多轮处理，不是只给 JS 增加工作量。
 
 ## 效果
 
 所有效果都用整数参数描述，结果统一为 `clamp((加权和 + bias) >> shift, 0, 255)`（`>>` 为算术右移，即向下取整），
-Alpha 始终不变，因此三条实现可以逐字节一致。参数表在 [`src/effects.js`](src/effects.js)，通过 `get_params()` 写进 Wasm 内存，
+Alpha 始终不变，因此所有实现可以逐字节一致。参数表在 [`src/effects.js`](src/effects.js)，通过 `get_params()` 写进 Wasm 内存，
 切换效果不需要重新编译或重启实时管线。
 
 | 类型 | 效果 | 参数 |
@@ -63,7 +65,7 @@ Alpha 始终不变，因此三条实现可以逐字节一致。参数表在 [`sr
 | | 浮雕 | `-2 -1 0 / -1 1 1 / 0 1 2`，bias 128 |
 | 颜色矩阵（逐像素） | 灰度、怀旧、暖色提亮、反色 | 3 × 4 矩阵 `[r g b bias]`，`>> 8` |
 
-参数约束（JS 与 C++ 同时检查）：`shift` 为 0–30，权重绝对值 ≤ 32767，`|bias| + 255 × Σ|w|` 不超过 32 位有符号整数。
+参数约束（JS、C++、AssemblyScript 同时检查）：`shift` 为 0–30，权重绝对值 ≤ 32767，`|bias| + 255 × Σ|w|` 不超过 32 位有符号整数。
 
 SIMD 卷积按参数自动选路径：非零权重全部相同（均值模糊）时先在 16 位里求和再乘一次；`|bias| + 255 × Σ|w| ≤ 32767` 时全程 16 位乘加，
 一次处理 8 个通道（高斯、锐化、边缘、浮雕）；其余情况用 32 位扩展乘法累加。颜色矩阵把 4 个像素拆成 R/G/B 三个 i32x4 计算。
@@ -83,14 +85,37 @@ SIMD 卷积按参数自动选路径：非零权重全部相同（均值模糊）
 - “零拷贝”指不经过中间 JS 缓冲区：`copyTo` 本身仍有一次 GPU/解码器 → Wasm 内存的读回与格式转换，`putImageData` 仍有一次写入画布。
 - 页面不可见或被浏览器节流时，视频帧回调会降频，主线程与逐帧转移路径的帧率和掉帧不代表真实性能。
 
+## 两种 Wasm 源语言
+
+同一套效果引擎分别用 C++（[`native/benchmark.cc`](native/benchmark.cc)）和 AssemblyScript（[`assembly/effects.ts`](assembly/effects.ts)）实现。
+两者的导出函数（`get_input` / `get_params` / `get_capacity` / `get_simd` / `process`）、内存布局、整数公式和 SIMD 路径选择完全相同，
+所以 [`kernels.js`](src/kernels.js) 的 `WasmProcessor` 不加区分地加载它们，构建清单 `WASM_BUILDS` 新增一项即可接入第五、第六种实现。
+
+AssemblyScript 的语法就是带具体整数类型的 TypeScript：`load<u8>(地址)` / `store<u8>(地址, 值)` 相当于 C++ 的指针读写，
+`v128` 系列内置函数与 `wasm_simd128.h` 一一对应；编译期常量 `ASC_FEATURE_SIMD` 相当于 C++ 的 `#ifdef __wasm_simd128__`。
+两个模块都无任何导入，体积约 1.7 KB（标量）和 2.6 KB（SIMD）。
+
+Node 24 / Apple Silicon 上 1280×720 × 4 轮的计算耗时（ms，中位数）：
+
+| 效果 | C++ 标量 | AS 标量 | C++ SIMD | AS SIMD |
+|---|---|---|---|---|
+| 均值模糊 | 11.6 | 16.2 | 3.6 | 3.9 |
+| 锐化 | 14.6 | 17.7 | 2.3 | 2.7 |
+| 灰度 | 6.5 | 8.0 | 2.0 | 3.0 |
+
+同一算法、同一写法下，AssemblyScript 标量约慢 20–40%，SIMD 卷积约慢 10–25%，SIMD 颜色矩阵约慢 50%：
+差距主要来自编译器优化（Clang/LLVM 对比 Binaryen），例如循环内参数读取的外提。页面基准表下方会实时给出两种语言的耗时比。
+
 ## 编译与测试
 
 ```sh
-npm run build   # 重新编译 wasm/
+npm install     # 仅编译 AssemblyScript 需要（devDependencies 中的 asc），页面运行无需安装
+npm run build   # 重新编译 wasm/；ONLY=cpp 或 ONLY=as 只编其中一种
 npm test
 ```
 
-`build.mjs` 使用支持 wasm32 的 Clang 和 `wasm-ld`，可通过 `CLANG`、`WASM_LD` 指定路径，
+AssemblyScript 用 `asc -O3 --noAssert --runtime stub` 编译，内存固定 512 页（32 MiB），SIMD 版加 `--enable simd`。
+C++ 部分：支持 wasm32 的 Clang 和 `wasm-ld`，可通过 `CLANG`、`WASM_LD` 指定路径，
 也能使用本机 Rust 工具链随附的 `rust-lld`。两份模块均以 `-O3` 编译，SIMD 版额外启用
 `-msimd128`，不依赖 Emscripten 运行时、WASI 导入或系统标准库。
 

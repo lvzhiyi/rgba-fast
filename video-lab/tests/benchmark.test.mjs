@@ -1,15 +1,20 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { readFile } from 'node:fs/promises';
-import { JSProcessor, WasmProcessor, comparePixels, statistics, validateConfig } from '../src/kernels.js';
+import { JSProcessor, WasmProcessor, WASM_BUILDS, comparePixels, statistics, validateConfig } from '../src/kernels.js';
 import { EFFECTS, encodeEffect, validateEffect } from '../src/effects.js';
 
+const KINDS = WASM_BUILDS.map(build => build.id);
+
 async function processor(kind, width, height) {
-  const binary = await readFile(new URL(`../wasm/benchmark-${kind}.wasm`, import.meta.url));
+  const build = WASM_BUILDS.find(item => item.id === kind);
+  const binary = await readFile(new URL(`../wasm/${build.file}`, import.meta.url));
   const { instance } = await WebAssembly.instantiate(binary);
-  assert.equal(instance.exports.get_simd(), kind === 'simd' ? 1 : 0);
+  assert.equal(instance.exports.get_simd(), build.simd ? 1 : 0, `${kind} SIMD flag`);
   assert.deepEqual(WebAssembly.Module.imports(new WebAssembly.Module(binary)), []);
-  return new WasmProcessor(instance, width, height);
+  const result = new WasmProcessor(instance, width, height);
+  result.kind = kind;
+  return result;
 }
 
 // 独立参考实现：按坐标取邻域、用 Math.floor 做除法，避免只比较两份可能共享同一错误的优化实现。
@@ -62,14 +67,14 @@ for (const [id, effect] of Object.entries(CASES)) {
       const saved = input.slice();
       const js = new JSProcessor(width, height);
       js.setEffect(effect);
-      const engines = await Promise.all(['scalar', 'simd'].map(kind => processor(kind, width, height)));
+      const engines = await Promise.all(KINDS.map(kind => processor(kind, width, height)));
       for (const engine of engines) engine.setEffect(effect);
       for (const passes of [1, 2, 5]) {
         const expected = reference(input, width, height, passes, effect);
         assert.deepEqual(js.run(input, passes), expected, `js ${width}x${height} ×${passes}`);
         for (const engine of engines) {
           engine.prepare(input);
-          assert.deepEqual(engine.run(passes), expected, `wasm ${width}x${height} ×${passes}`);
+          assert.deepEqual(engine.run(passes), expected, `${engine.kind} ${width}x${height} ×${passes}`);
           assert.deepEqual(engine.run(passes), expected, 'each run starts from immutable input');
         }
       }
@@ -83,7 +88,7 @@ test('extreme inputs saturate identically in every implementation', async () => 
   const height = 6;
   // 黑白棋盘让锐化、边缘、浮雕的加权和远超 0..255，检验截断与负数右移。
   const input = Uint8Array.from({ length: width * height * 4 }, (_, i) => (i % 4 === 3 ? 200 : ((i >> 2) + (i >> 2) / width | 0) % 2 ? 255 : 0));
-  const engines = await Promise.all(['scalar', 'simd'].map(kind => processor(kind, width, height)));
+  const engines = await Promise.all(KINDS.map(kind => processor(kind, width, height)));
   const js = new JSProcessor(width, height);
   for (const effect of Object.values(CASES)) {
     js.setEffect(effect);
@@ -92,7 +97,7 @@ test('extreme inputs saturate identically in every implementation', async () => 
     for (const engine of engines) {
       engine.setEffect(effect);
       engine.prepare(input);
-      assert.deepEqual(engine.run(3), expected, effect.name);
+      assert.deepEqual(engine.run(3), expected, `${engine.kind} ${effect.name}`);
     }
   }
 });
@@ -105,16 +110,21 @@ test('effect parameters are validated in JS and rejected by Wasm', async () => {
   assert.throws(() => validateEffect({ ...blur, weights: Array(9).fill(0.5) }), RangeError);
   assert.throws(() => validateEffect({ kind: 'color', shift: 8, matrix: Array(12).fill(32767).map((v, i) => i % 4 === 3 ? 2 ** 31 - 100 : v) }), RangeError);
   assert.throws(() => validateEffect({ kind: 'other', shift: 0 }), RangeError);
-  const engine = await processor('simd', 4, 4);
-  // 绕过 JS 校验直接写入非法参数，Wasm 必须拒绝。
-  engine.params.set(encodeEffect(blur));
-  engine.params[2] = 40000;
-  assert.equal(engine.exports.process(4, 4, 1), 0);
-  engine.params[2] = 7282;
-  engine.params[0] = 7;
-  assert.equal(engine.exports.process(4, 4, 1), 0);
-  engine.setEffect(blur);
-  assert.notEqual(engine.exports.process(4, 4, 1), 0);
+  for (const kind of KINDS) {
+    const engine = await processor(kind, 4, 4);
+    // 绕过 JS 校验直接写入非法参数，每个 Wasm 构建都必须拒绝。
+    engine.params.set(encodeEffect(blur));
+    engine.params[2] = 40000;
+    assert.equal(engine.exports.process(4, 4, 1), 0, kind);
+    engine.params[2] = 7282;
+    engine.params[0] = 7;
+    assert.equal(engine.exports.process(4, 4, 1), 0, kind);
+    engine.params[0] = 0;
+    engine.params[1] = 31;
+    assert.equal(engine.exports.process(4, 4, 1), 0, kind);
+    engine.setEffect(blur);
+    assert.notEqual(engine.exports.process(4, 4, 1), 0, kind);
+  }
 });
 
 test('SIMD integer division is exact for every possible nine-byte sum', () => {
@@ -122,20 +132,22 @@ test('SIMD integer division is exact for every possible nine-byte sum', () => {
 });
 
 test('1080p capacity, maximum pass count and rejected dimensions', async () => {
-  const engine = await processor('simd', 1920, 1080);
   const input = new Uint8Array(1920 * 1080 * 4).fill(255);
-  engine.prepare(input);
-  assert.deepEqual(engine.run(1), input);
-  assert.equal(engine.exports.process(1921, 1080, 1), 0);
-  assert.equal(engine.exports.process(1920, 1081, 1), 0);
-  assert.equal(engine.exports.process(0, 1, 1), 0);
-  assert.equal(engine.exports.process(1, 1, 33), 0);
+  for (const kind of KINDS) {
+    const engine = await processor(kind, 1920, 1080);
+    engine.prepare(input);
+    assert.deepEqual(engine.run(1), input, kind);
+    assert.equal(engine.exports.process(1921, 1080, 1), 0);
+    assert.equal(engine.exports.process(1920, 1081, 1), 0);
+    assert.equal(engine.exports.process(0, 1, 1), 0);
+    assert.equal(engine.exports.process(1, 1, 33), 0);
+    assert.throws(() => engine.prepare(new Uint8Array(3)), RangeError);
+    const small = await processor(kind, 5, 5);
+    small.prepare(new Uint8Array(100).fill(255));
+    assert.deepEqual(small.run(32), new Uint8Array(100).fill(255), kind);
+  }
   assert.throws(() => validateConfig(1, 1, 0), RangeError);
   assert.throws(() => new JSProcessor(1921, 1080), RangeError);
-  assert.throws(() => engine.prepare(new Uint8Array(3)), RangeError);
-  const small = await processor('simd', 5, 5);
-  small.prepare(new Uint8Array(100).fill(255));
-  assert.deepEqual(small.run(32), new Uint8Array(100).fill(255));
 });
 
 test('comparison detects errors and statistics use median and nearest-rank P95', () => {
