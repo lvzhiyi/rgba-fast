@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { LiveMeter, coverRect, droppedBetween } from '../src/live-stats.js';
+import { LiveMeter, coverRect, droppedBetween } from '../src/live-stats.ts';
 
 test('coverRect crops the source centre to the target aspect ratio', () => {
   assert.deepEqual(coverRect(1920, 1080, 1280, 720), { x: 0, y: 0, width: 1920, height: 1080 });
@@ -31,6 +31,7 @@ test('LiveMeter summarises segments, drops and FPS continuously across windows',
   meter.drop(1);
   meter.drop(0);
   let summary = meter.summary();
+  assert.ok(summary);
   assert.equal(summary.frames, 5);
   assert.equal(summary.fps, 25);
   assert.equal(summary.dropped, 1);
@@ -41,6 +42,7 @@ test('LiveMeter summarises segments, drops and FPS continuously across windows',
   clock = 200;
   meter.add({ copyIn: 1, process: 1, output: 1, total: 3 });
   summary = meter.summary();
+  assert.ok(summary);
   assert.equal(summary.fps, 25, 'interval measured from the previous window’s last frame');
   assert.throws(() => meter.add({ copyIn: -1, process: 0, output: 0, total: 0 }), RangeError);
 });

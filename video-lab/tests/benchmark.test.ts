@@ -1,25 +1,27 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { readFile } from 'node:fs/promises';
-import { JSProcessor, WasmProcessor, WASM_BUILDS, comparePixels, statistics, validateConfig } from '../src/kernels.js';
-import { EFFECTS, encodeEffect, validateEffect } from '../src/effects.js';
+import { JSProcessor, WasmProcessor, WASM_BUILDS, comparePixels, statistics, validateConfig } from '../src/kernels.ts';
+import { EFFECTS, encodeEffect, validateEffect } from '../src/effects.ts';
+import type { Effect, NamedEffect } from '../src/effects.ts';
+import type { WasmId } from '../src/kernels.ts';
 
 const KINDS = WASM_BUILDS.map(build => build.id);
 
-async function processor(kind, width, height) {
+async function processor(kind: WasmId, width: number, height: number) {
   const build = WASM_BUILDS.find(item => item.id === kind);
+  assert.ok(build);
   const binary = await readFile(new URL(`../wasm/${build.file}`, import.meta.url));
   const { instance } = await WebAssembly.instantiate(binary);
-  assert.equal(instance.exports.get_simd(), build.simd ? 1 : 0, `${kind} SIMD flag`);
   assert.deepEqual(WebAssembly.Module.imports(new WebAssembly.Module(binary)), []);
   const result = new WasmProcessor(instance, width, height);
-  result.kind = kind;
-  return result;
+  assert.equal(result.exports.get_simd(), build.simd ? 1 : 0, `${kind} SIMD flag`);
+  return Object.assign(result, { kind });
 }
 
 // 独立参考实现：按坐标取邻域、用 Math.floor 做除法，避免只比较两份可能共享同一错误的优化实现。
-function reference(input, width, height, passes, effect) {
-  const clamp = value => Math.min(255, Math.max(0, value));
+function reference(input: Uint8Array, width: number, height: number, passes: number, effect: Effect) {
+  const clamp = (value: number) => Math.min(255, Math.max(0, value));
   const scale = 2 ** effect.shift;
   let source = input;
   for (let pass = 0; pass < passes; pass++) {
@@ -53,7 +55,7 @@ function reference(input, width, height, passes, effect) {
 
 // 内置效果覆盖了“等权重”和“16 位小权重”两条 SIMD 路径；再补两组自定义参数，
 // 分别命中“部分零权重的等权重”和“必须 32 位累加的通用路径”（含负数与偏移）。
-const CASES = {
+const CASES: Record<string, NamedEffect> = {
   ...EFFECTS,
   crossUniform: { name: '十字等权', kind: 'convolution', weights: [0, 3, 0, 3, 3, 3, 0, 3, 0], bias: -40, shift: 4 },
   general: { name: '通用 32 位', kind: 'convolution', weights: [300, -1200, 450, -800, 4000, -700, 120, -900, 500], bias: 9000, shift: 10 },
@@ -109,7 +111,7 @@ test('effect parameters are validated in JS and rejected by Wasm', async () => {
   assert.throws(() => validateEffect({ ...blur, weights: Array(9).fill(40000) }), RangeError);
   assert.throws(() => validateEffect({ ...blur, weights: Array(9).fill(0.5) }), RangeError);
   assert.throws(() => validateEffect({ kind: 'color', shift: 8, matrix: Array(12).fill(32767).map((v, i) => i % 4 === 3 ? 2 ** 31 - 100 : v) }), RangeError);
-  assert.throws(() => validateEffect({ kind: 'other', shift: 0 }), RangeError);
+  assert.throws(() => validateEffect({ kind: 'other', shift: 0 } as unknown as Effect), RangeError);
   for (const kind of KINDS) {
     const engine = await processor(kind, 4, 4);
     // 绕过 JS 校验直接写入非法参数，每个 Wasm 构建都必须拒绝。

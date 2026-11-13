@@ -6,33 +6,40 @@
 ## 启动
 
 ```sh
-cd /Users/lv/work/stady/wasm/video-lab
+npm ci
 npm run dev
 ```
 
-打开 <http://127.0.0.1:5500/>（可用 `PORT=xxxx npm run dev` 换端口）。`serve.mjs` 无第三方依赖，
-返回正确的 `.wasm` / 视频 MIME、支持 Range，并开启跨源隔离（COOP/COEP）。
-仓库已附带编译好的 Wasm，正常使用无需编译工具；可上传本地图片或截取视频帧。
+打开 <http://127.0.0.1:5500/>，可用 `PORT=xxxx npm run dev` 换端口。需要 Node.js 22.13+（22.x）或 23.5+，测试和 Wasm 构建脚本由 Node.js 直接运行 TypeScript。
+仓库已附带编译好的 Wasm，启动页面无需安装 Wasm 编译工具。
+
+`npm run typecheck` 单独执行严格类型检查，`npm run build` 先检查类型再生成 `dist/`，`npm run preview` 可在本地预览。Vite 的开发和预览服务都配置了跨源隔离响应头。将 `dist/` 部署到其他静态服务器时，需同步配置 `vite.config.ts` 中的 COOP/COEP 响应头。
 
 ## 目录
 
 ```
 video-lab/
-├── index.html / style.css    页面
-├── serve.mjs                 本地静态服务
-├── build.mjs                 编译 native/ 与 assembly/ → wasm/
+├── index.html / style.css    HTML 入口和页面样式
+├── vite.config.ts            React 插件、开发和预览服务配置
+├── build.ts                 编译 native/ 与 assembly/ → wasm/
 ├── src/
-│   ├── app.js                界面、视频实时滤镜、历史与导出
-│   ├── effects.js            效果表：卷积核 / 颜色矩阵的整数参数、校验与编码
-│   ├── kernels.js            JS 实现、Wasm 包装、校验与统计
-│   ├── benchmark-worker.js   在 Worker 中执行基准测量
-│   ├── pipeline-worker.js    实时管线：VideoFrame → Wasm 内存 → 滤镜 → OffscreenCanvas
-│   └── live-stats.js         实时分段计量、掉帧估算、cover 裁剪
+│   ├── main.tsx / App.tsx    React 入口、页面状态与交互
+│   ├── components/          基准面板、测试历史和视频预览
+│   ├── useBenchmark.ts      基准 Worker 生命周期、历史和导出
+│   ├── useFixedFrame.ts     固定帧、图片与视频截图
+│   ├── live-video.ts        媒体会话、帧调度、主线程处理和实时 Worker 调用
+│   ├── worker-protocol.ts   主线程与 Worker 共用的消息类型
+│   ├── wasm-assets.ts       Vite 构建产物中的 Wasm URL
+│   ├── effects.ts            效果表：卷积核 / 颜色矩阵的整数参数、校验与编码
+│   ├── kernels.ts            JS 实现、Wasm 包装、校验与统计
+│   ├── benchmark-worker.ts   在 Worker 中执行基准测量
+│   ├── pipeline-worker.ts    实时管线：VideoFrame → Wasm 内存 → 滤镜 → OffscreenCanvas
+│   └── live-stats.ts         实时分段计量、掉帧估算、cover 裁剪
 ├── native/benchmark.cc       C++ 计算核心（标量 + SIMD128）
 ├── assembly/effects.ts       AssemblyScript 计算核心（与 C++ 同一算法、同一内存布局）
 ├── wasm/                     编译产物 benchmark-{scalar,simd}.wasm（C++）、
 │                             assemblyscript-{scalar,simd}.wasm（AssemblyScript）
-├── assets/                   示例图片、视频、图标库
+├── assets/                   示例图片和视频
 └── tests/                    node:test 单元测试
 ```
 
@@ -53,7 +60,7 @@ video-lab/
 ## 效果
 
 所有效果都用整数参数描述，结果统一为 `clamp((加权和 + bias) >> shift, 0, 255)`（`>>` 为算术右移，即向下取整），
-Alpha 始终不变，因此所有实现可以逐字节一致。参数表在 [`src/effects.js`](src/effects.js)，通过 `get_params()` 写进 Wasm 内存，
+Alpha 始终不变，因此所有实现可以逐字节一致。参数表在 [`src/effects.ts`](src/effects.ts)，通过 `get_params()` 写进 Wasm 内存，
 切换效果不需要重新编译或重启实时管线。
 
 | 类型 | 效果 | 参数 |
@@ -89,7 +96,7 @@ SIMD 卷积按参数自动选路径：非零权重全部相同（均值模糊）
 
 同一套效果引擎分别用 C++（[`native/benchmark.cc`](native/benchmark.cc)）和 AssemblyScript（[`assembly/effects.ts`](assembly/effects.ts)）实现。
 两者的导出函数（`get_input` / `get_params` / `get_capacity` / `get_simd` / `process`）、内存布局、整数公式和 SIMD 路径选择完全相同，
-所以 [`kernels.js`](src/kernels.js) 的 `WasmProcessor` 不加区分地加载它们，构建清单 `WASM_BUILDS` 新增一项即可接入第五、第六种实现。
+所以 [`kernels.ts`](src/kernels.ts) 的 `WasmProcessor` 不加区分地加载它们，构建清单 `WASM_BUILDS` 新增一项即可接入第五、第六种实现。
 
 AssemblyScript 的语法就是带具体整数类型的 TypeScript：`load<u8>(地址)` / `store<u8>(地址, 值)` 相当于 C++ 的指针读写，
 `v128` 系列内置函数与 `wasm_simd128.h` 一一对应；编译期常量 `ASC_FEATURE_SIMD` 相当于 C++ 的 `#ifdef __wasm_simd128__`。
@@ -109,8 +116,8 @@ Node 24 / Apple Silicon 上 1280×720 × 4 轮的计算耗时（ms，中位数�
 ## 编译与测试
 
 ```sh
-npm install     # 仅编译 AssemblyScript 需要（devDependencies 中的 asc），页面运行无需安装
-npm run build   # 重新编译 wasm/；ONLY=cpp 或 ONLY=as 只编其中一种
+npm ci
+npm run build:wasm  # 重新编译 wasm/；ONLY=cpp 或 ONLY=as 只编其中一种
 npm test
 ```
 

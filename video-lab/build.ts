@@ -18,7 +18,7 @@ if (!linker) {
 // 中间产物 .o 放临时目录，结束时删除。
 const temporary = mkdtempSync(join(tmpdir(), 'rgba-wasm-'));
 // 同步执行外部命令，输出直接打印到终端；失败则抛错中止构建。
-function run(command, args) {
+function run(command: string, args: string[]) {
   const result = spawnSync(command, args, { stdio: 'inherit' });
   if (result.error || result.status !== 0) throw result.error || new Error(`${command} 编译失败`);
 }

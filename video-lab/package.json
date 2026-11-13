@@ -3,11 +3,28 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "node serve.mjs",
-    "build": "node build.mjs",
-    "test": "node --test tests/*.test.mjs"
+    "dev": "vite",
+    "build": "npm run typecheck && vite build",
+    "preview": "vite preview",
+    "build:wasm": "node --experimental-strip-types build.ts",
+    "test": "node --experimental-strip-types --test tests/*.test.ts",
+    "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
-    "assemblyscript": "0.28.20"
+    "@types/node": "^26.6.6",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.3.0",
+    "assemblyscript": "0.28.20",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.8"
+  },
+  "dependencies": {
+    "lucide-react": "^1.72.0",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1"
+  },
+  "engines": {
+    "node": "^22.13.0 || >=23.5.0"
   }
 }

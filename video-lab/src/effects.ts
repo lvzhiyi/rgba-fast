@@ -11,6 +11,17 @@
 //   [w0 w1 w2                       左上 正上 右上
 //    w3 w4 w5                       正左 自己 正右
 //    w6 w7 w8]                      左下 正下 右下
+/** 两种滤镜共享的名称、说明及整数计算用的右移位数。 */
+type EffectMetadata = { name?: string; note?: string; shift: number };
+/** 3×3 整数卷积。九个权重按行排列，bias 在右移前加到累加值上。 */
+export type ConvolutionEffect = EffectMetadata & { kind: 'convolution'; weights: number[]; bias: number };
+/** 整数颜色矩阵。每行包含三个 RGB 权重和一个偏移，Alpha 保持原值。 */
+export type ColorEffect = EffectMetadata & { kind: 'color'; matrix: number[] };
+/** 滤镜参数的联合类型，由 kind 区分卷积和颜色矩阵。 */
+export type Effect = ConvolutionEffect | ColorEffect;
+/** 带显示名称的效果定义，供界面和结果记录使用。 */
+export type NamedEffect = Effect & { name: string };
+
 export const EFFECTS = {
   box: { name: '均值模糊', kind: 'convolution', weights: Array(9).fill(7282), bias: 0, shift: 16,
     note: '九点均值；(sum × 7282) >> 16 与 floor(sum / 9) 完全一致' },
@@ -30,24 +41,26 @@ export const EFFECTS = {
     matrix: [282, 0, 0, 12 << 8, 0, 269, 0, 6 << 8, 0, 0, 243, 0], note: 'R ×1.1 +12，G ×1.05 +6，B ×0.95' },
   invert: { name: '反色', kind: 'color', shift: 8,
     matrix: [-256, 0, 0, 255 << 8, 0, -256, 0, 255 << 8, 0, 0, -256, 255 << 8], note: '255 - 通道值' },
-};
+} satisfies Record<string, NamedEffect>;
 
+/** 效果表中的合法键，用于下拉框和 Worker 消息。 */
+export type EffectId = keyof typeof EFFECTS;
 export const DEFAULT_EFFECT = 'box';
 export const PARAM_COUNT = 16;      // Wasm 侧 params 数组长度（实际最多用到 14 个）
 const WEIGHT_LIMIT = 32767;         // 16 位有符号整数上限：SIMD 卷积把权重当 i16 参与乘法
 const SUM_LIMIT = 2147483647;       // 32 位有符号整数上限：累加结果不能超过它
 
 // 按 id 取效果定义，id 不存在时抛错（防止界面传来未知值）。
-export function getEffect(id) {
-  const effect = EFFECTS[id];
+export function getEffect(id: string): NamedEffect {
+  const effect = Object.hasOwn(EFFECTS, id) ? EFFECTS[id as EffectId] : undefined;
   if (!effect) throw new RangeError(`未知效果：${id}`);
   return effect;
 }
 
 // 与 C++ valid_params 相同的约束：权重可放进 16 位有符号数，累加不超出 32 位有符号整数。
 // 估算方法：假设每个像素都取最大值 255，|bias| + Σ(|权重| × 255) 就是累加可能达到的最大绝对值。
-export function validateEffect(effect) {
-  const integers = values => values.every(Number.isInteger);
+export function validateEffect<T extends Effect>(effect: T): T {
+  const integers = (values: number[]) => values.every(Number.isInteger);
   if (!Number.isInteger(effect.shift) || effect.shift < 0 || effect.shift > 30) throw new RangeError('shift 须为 0–30 的整数');
   const rows = effect.kind === 'convolution' ? [[...effect.weights, effect.bias]]
     : effect.kind === 'color' ? [0, 1, 2].map(row => effect.matrix.slice(row * 4, row * 4 + 4)) : null;
@@ -58,7 +71,7 @@ export function validateEffect(effect) {
     if (!integers(row)) throw new RangeError('效果参数须为整数');
     const weights = row.slice(0, -1);
     if (weights.some(value => Math.abs(value) > WEIGHT_LIMIT)) throw new RangeError('权重超出 16 位范围');
-    if (Math.abs(row.at(-1)) + weights.reduce((sum, value) => sum + Math.abs(value) * 255, 0) > SUM_LIMIT) {
+    if (Math.abs(row[row.length - 1]) + weights.reduce((sum, value) => sum + Math.abs(value) * 255, 0) > SUM_LIMIT) {
       throw new RangeError('效果参数可能导致 32 位溢出');
     }
   }
@@ -69,7 +82,7 @@ export function validateEffect(effect) {
 //   [0] 类型（0 卷积 / 1 颜色矩阵）  [1] shift
 //   卷积：[2..10] 九个权重  [11] bias
 //   颜色：[2..13] 三行 [r, g, b, bias]
-export function encodeEffect(effect) {
+export function encodeEffect(effect: Effect) {
   validateEffect(effect);
   const params = new Int32Array(PARAM_COUNT);
   params[0] = effect.kind === 'convolution' ? 0 : 1;
