@@ -3,6 +3,7 @@ import sampleImage from '../assets/sample.jpg';
 import { BenchmarkControls, BenchmarkHistory, BenchmarkResults } from './components/BenchmarkPanel.tsx';
 import { VideoPreview } from './components/VideoPreview.tsx';
 import { DEFAULT_EFFECT, getEffect } from './effects.ts';
+import { isGpu } from './kernels.ts';
 import { createLiveVideo } from './live-video.ts';
 import { useBenchmark } from './useBenchmark.ts';
 import { useFixedFrame } from './useFixedFrame.ts';
@@ -25,6 +26,8 @@ export default function App() {
   const input = useRef<HTMLCanvasElement>(null);
   const output = useRef<HTMLCanvasElement>(null);
   const worker = useRef<HTMLCanvasElement>(null);
+  const gpu = useRef<HTMLCanvasElement>(null);
+  const webgpu = useRef<HTMLCanvasElement>(null);
   const video = useRef<HTMLVideoElement>(null);
   const liveVideo = useRef<ReturnType<typeof createLiveVideo>>(null);
   // 用版本号丢弃过期的图片解码结果。示例图加载完成时读取最新分辨率。
@@ -51,6 +54,8 @@ export default function App() {
       inputCanvas: input.current!,
       outputCanvas: output.current!,
       getWorkerCanvas: () => worker.current!,
+      getGpuCanvas: () => gpu.current!,
+      getWebgpuCanvas: () => webgpu.current!,
       replaceWorkerCanvas: () => setWorkerCanvasKey(key => key + 1),
       onChange({ mode, ...state }) {
         if (!mounted) return;
@@ -104,6 +109,7 @@ export default function App() {
   // 效果和实时实现可以热切换。输入源、管线或尺寸变更需要结束当前会话。
   const changeOption: ChangeOption = (field, value) => {
     const next = { ...options, [field]: value };
+    if (next.pipeline === 'main' && isGpu(next.mode)) next.mode = 'simd';
     setOptions(next);
     if (field === 'mode' || field === 'effect') {
       liveVideo.current?.update(field === 'mode'
@@ -191,13 +197,13 @@ export default function App() {
     <>
       <header>
         <div className="brand"><span className="brand-mark">RGBA</span><h1>像素性能实验室</h1></div>
-        <span className="platform">JavaScript / C++ · AssemblyScript → WebAssembly / SIMD128</span>
+        <span className="platform">JavaScript / C++ · AssemblyScript → WebAssembly / SIMD128 · WebGL2 · WebGPU</span>
       </header>
       <main>
         <BenchmarkControls options={options} onOption={changeOption} benchmark={benchmark} busy={busy}
           hasFrame={frame.hasFrame} status={status} onStart={startBenchmark} />
         <BenchmarkResults benchmark={benchmark} effectId={options.effect} />
-        <VideoPreview options={options} live={live} media={{ input, output, worker, video }} workerCanvasKey={workerCanvasKey}
+        <VideoPreview options={options} live={live} media={{ input, output, worker, gpu, webgpu, video }} workerCanvasKey={workerCanvasKey}
           sourceName={frame.sourceName} previewMeta={previewMeta} busy={busy} onOption={changeOption}
           onUpload={uploadImage} onToggle={toggleLive} onCapture={() => {
             captureFrame(getConfig(options));

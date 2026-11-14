@@ -1,6 +1,6 @@
 import { useRef } from 'react';
 import { Camera, ImageUp, Pause, Video } from 'lucide-react';
-import { IMPLEMENTATIONS } from '../kernels.ts';
+import { IMPLEMENTATIONS, isGpu } from '../kernels.ts';
 import sampleVideo from '../../assets/sample.mp4';
 import type { RefObject } from 'react';
 import type { ChangeOption, LabOptions, LiveView } from '../ui-types.ts';
@@ -14,6 +14,8 @@ type VideoPreviewProps = {
     input: RefObject<HTMLCanvasElement | null>;
     output: RefObject<HTMLCanvasElement | null>;
     worker: RefObject<HTMLCanvasElement | null>;
+    gpu: RefObject<HTMLCanvasElement | null>;
+    webgpu: RefObject<HTMLCanvasElement | null>;
     video: RefObject<HTMLVideoElement | null>;
   };
   workerCanvasKey: number;
@@ -39,6 +41,7 @@ function LiveStats({ live, source }: { live: LiveView; source: LiveSource }) {
       <span>输出 <b>{stats?.output.mean.toFixed(2) ?? '--'}</b> ms</span>
       <span>整帧 <b>{stats?.total.mean.toFixed(2) ?? '--'}</b> ms</span>
       <span>整帧 P95 <b>{stats?.total.p95.toFixed(2) ?? '--'}</b> ms</span>
+      {stats?.gpuMean !== undefined && <span>GPU 滤镜 <b>{stats.gpuMean.toFixed(2)}</b> ms</span>}
       <span>处理帧率 <b>{stats?.fps?.toFixed(1) ?? '--'}</b> FPS</span>
       <span>掉帧 <b>{stats ? `${stats.dropped} · ${(stats.dropRate * 100).toFixed(1)}%` : '--'}</b></span>
       <span>取帧路径 <b title={stats?.fallbackReason}>{stats?.path ?? '--'}</b></span>
@@ -53,6 +56,7 @@ export function VideoPreview({ options, live, media, workerCanvasKey, sourceName
   const upload = useRef<HTMLInputElement>(null);
   const playing = live.phase === 'playing';
   const workerPlaying = playing && live.kind === 'worker';
+  const gpuPlaying = workerPlaying && isGpu(options.mode);
   return (
     <section className="preview" aria-labelledby="preview-title">
       <div className="section-heading">
@@ -80,7 +84,7 @@ export function VideoPreview({ options, live, media, workerCanvasKey, sourceName
           <label>实时实现
             <select value={options.mode} onChange={e => onOption('mode', e.target.value as LiveMode)} disabled={busy}>
               <option value="none">原始画面</option>
-              {Object.entries(IMPLEMENTATIONS).map(([id, name]) => <option key={id} value={id}>{name}</option>)}
+              {Object.entries(IMPLEMENTATIONS).map(([id, name]) => <option key={id} value={id} disabled={isGpu(id) && options.pipeline === 'main'}>{name}</option>)}
             </select>
           </label>
         </div>
@@ -98,12 +102,14 @@ export function VideoPreview({ options, live, media, workerCanvasKey, sourceName
           <div className="media-surface">
             <canvas ref={media.output} width={1280} height={720} hidden={workerPlaying} />
             {/* Canvas 转移给 Worker 后无法再次转移。Worker 故障时换 key 创建新的 DOM 节点。 */}
-            <canvas key={workerCanvasKey} ref={media.worker} hidden={!workerPlaying} />
+            <canvas key={workerCanvasKey} ref={media.worker} hidden={!workerPlaying || gpuPlaying} />
+            <canvas key={`gpu-${workerCanvasKey}`} ref={media.gpu} hidden={!gpuPlaying || options.mode !== 'webgl2'} />
+            <canvas key={`webgpu-${workerCanvasKey}`} ref={media.webgpu} hidden={!gpuPlaying || options.mode !== 'webgpu'} />
           </div>
         </figure>
       </div>
       <LiveStats live={live} source={options.source} />
-      <p className="note">取帧：VideoFrame 写入滤镜输入缓冲区（Wasm 模式下即 Wasm 线性内存）；处理：滤镜计算；输出：写入画布。三段均为管线所在线程的同步耗时，掉帧按帧时间戳或视频帧回调的 presentedFrames 统计。</p>
+      <p className="note">CPU 处理计滤镜计算，输出计画布写入。GPU 路径的处理段计滤镜命令提交，输出含等待 GPU 完成，GPU 滤镜时间来自硬件查询。整帧耗时统计到管线输出完成。</p>
     </section>
   );
 }

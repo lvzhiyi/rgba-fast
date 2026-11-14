@@ -70,7 +70,7 @@ export function useBenchmark(outputCanvas: RefObject<HTMLCanvasElement | null>, 
           source,
           algorithm: { id: config.effect, ...effect, formula: 'clamp((sum + bias) >> shift, 0, 255); alpha preserved' },
           build: WASM_BUILDS.map(build => `${build.id}: ${build.source} -O3${build.simd ? ' SIMD128' : ''}`),
-          timing: 'Worker; allocation, load, decode and Canvas excluded',
+          timing: 'Worker; excludes setup, decode and Canvas. WebGL2/WebGPU filter timing uses optional GPU queries. Upload is host call time, download includes execution wait and readback, total is JS RGBA to JS RGBA.',
         };
         const canvas = outputCanvas.current!;
         canvas.width = config.width;

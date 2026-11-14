@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import { readFile } from 'node:fs/promises';
 import { JSProcessor, WasmProcessor, WASM_BUILDS, comparePixels, statistics, validateConfig } from '../src/kernels.ts';
 import { EFFECTS, encodeEffect, validateEffect } from '../src/effects.ts';
+import { reference } from './reference.ts';
 import type { Effect, NamedEffect } from '../src/effects.ts';
 import type { WasmId } from '../src/kernels.ts';
 
@@ -17,40 +18,6 @@ async function processor(kind: WasmId, width: number, height: number) {
   const result = new WasmProcessor(instance, width, height);
   assert.equal(result.exports.get_simd(), build.simd ? 1 : 0, `${kind} SIMD flag`);
   return Object.assign(result, { kind });
-}
-
-// 独立参考实现：按坐标取邻域、用 Math.floor 做除法，避免只比较两份可能共享同一错误的优化实现。
-function reference(input: Uint8Array, width: number, height: number, passes: number, effect: Effect) {
-  const clamp = (value: number) => Math.min(255, Math.max(0, value));
-  const scale = 2 ** effect.shift;
-  let source = input;
-  for (let pass = 0; pass < passes; pass++) {
-    const output = source.slice();
-    if (effect.kind === 'color') {
-      for (let p = 0; p < source.length; p += 4) {
-        for (let c = 0; c < 3; c++) {
-          const [r, g, b, bias] = effect.matrix.slice(c * 4, c * 4 + 4);
-          output[p + c] = clamp(Math.floor((r * source[p] + g * source[p + 1] + b * source[p + 2] + bias) / scale));
-        }
-      }
-    } else {
-      for (let y = 1; y < height - 1; y++) {
-        for (let x = 1; x < width - 1; x++) {
-          for (let c = 0; c < 3; c++) {
-            let sum = effect.bias;
-            for (let dy = -1; dy <= 1; dy++) {
-              for (let dx = -1; dx <= 1; dx++) {
-                sum += effect.weights[(dy + 1) * 3 + dx + 1] * source[((y + dy) * width + x + dx) * 4 + c];
-              }
-            }
-            output[(y * width + x) * 4 + c] = clamp(Math.floor(sum / scale));
-          }
-        }
-      }
-    }
-    source = output;
-  }
-  return source;
 }
 
 // 内置效果覆盖了“等权重”和“16 位小权重”两条 SIMD 路径；再补两组自定义参数，

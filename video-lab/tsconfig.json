@@ -5,7 +5,7 @@
     "module": "ESNext",
     "moduleResolution": "bundler",
     "jsx": "react-jsx",
-    "types": ["vite/client", "node"],
+    "types": ["vite/client", "node", "@webgpu/types"],
     "strict": true,
     "noEmit": true,
     "allowImportingTsExtensions": true,

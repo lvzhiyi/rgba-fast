@@ -1,5 +1,5 @@
 import type { EffectId, NamedEffect } from './effects.ts';
-import type { comparePixels, ImplementationId, statistics, WasmId, WasmLoadErrors } from './kernels.ts';
+import type { BackendId, GpuId, comparePixels, ImplementationId, statistics, WasmId, WasmLoadErrors } from './kernels.ts';
 import type { LiveSummary } from './live-stats.ts';
 
 /** 单帧处理参数。宽高为像素数，passes 为同一效果连续执行的轮数。 */
@@ -13,8 +13,11 @@ export type TimingSegment = 'compute' | 'upload' | 'download' | 'total';
 /** 各分段每批的单次平均耗时，单位为毫秒。 */
 export type BenchmarkSamples = Record<TimingSegment, number[]>;
 /** 单个实现的基准结果，包含分段统计、逐字节校验和原始采样。 */
-export type BenchmarkRow = Record<TimingSegment, ReturnType<typeof statistics>> & {
-  id: ImplementationId;
+export type BenchmarkRow = Record<Exclude<TimingSegment, 'compute'>, ReturnType<typeof statistics>> & {
+  compute: ReturnType<typeof statistics> | null;
+  id: BackendId;
+  /** 计算列的数据来源，GPU 查询缺失时 compute 为 null。 */
+  clock: 'cpu-wall' | 'gpu-query';
   check: ReturnType<typeof comparePixels>;
   rawSamples: BenchmarkSamples;
 };
@@ -22,7 +25,11 @@ export type BenchmarkRow = Record<TimingSegment, ReturnType<typeof statistics>> 
 export type BenchmarkResult = {
   type: 'result';
   rows: BenchmarkRow[];
-  loadErrors: WasmLoadErrors;
+  loadErrors: WasmLoadErrors & Partial<Record<GpuId, string>>;
+  /** WebGL2 读回的实际传输格式，可用于解释浏览器间的总耗时差异。 */
+  gpuReadbackFormat?: string;
+  /** WebGPU 读回方式，独立于历史 WebGL2 读回字段。 */
+  webgpuReadbackFormat?: string;
   warmup: number;
   batchSize: number;
   config: BenchmarkConfig;
@@ -46,7 +53,7 @@ export type BenchmarkRecord = Omit<BenchmarkResult, 'output'> & {
 };
 
 /** 实时预览的滤镜实现。none 直接显示原始画面。 */
-export type LiveMode = 'none' | ImplementationId;
+export type LiveMode = 'none' | BackendId;
 /** 实时预览的输入源。file 是项目自带的示例视频，camera 是摄像头。 */
 export type LiveSource = 'file' | 'camera';
 /** 实时滤镜执行的位置，分别对应主线程 Canvas 和 Worker VideoFrame。 */
@@ -54,11 +61,13 @@ export type PipelineKind = 'main' | 'worker';
 /** 启动实时预览所需的帧参数、输入源、管线和滤镜实现。 */
 export type LiveConfig = FrameConfig & { source: LiveSource; pipeline: PipelineKind; mode: LiveMode };
 /** 实时统计及实际取像素路径。回退到 Canvas 时可携带原因。 */
-export type LiveStats = LiveSummary & { path: string; fallbackReason?: string };
+export type LiveStats = LiveSummary & { path: string; fallbackReason?: string; gpuMean?: number };
 /** 启动实时 Worker 的参数。帧流与轨道择一转移，逐帧模式由后续 frame 消息供帧。 */
 export type PipelineStart = FrameConfig & {
   type: 'start';
   mode: LiveMode;
+  /** 实现选择版本，用于忽略早于最近一次切换的 GPU 回退。 */
+  modeRevision: number;
   /** 输入轨道报告的帧率（FPS），用于估算实时掉帧。 */
   frameRate?: number;
   /** 主线程创建处理器时，Worker 直接读取转移过来的帧流。 */
@@ -68,10 +77,10 @@ export type PipelineStart = FrameConfig & {
 };
 /** 主线程发给实时 Worker 的命令，涵盖初始化、启停、逐帧传输和配置更新。 */
 export type PipelineRequest =
-  | { type: 'init'; canvas: OffscreenCanvas }
+  | { type: 'init'; canvas: OffscreenCanvas; gpuCanvas: OffscreenCanvas; webgpuCanvas: OffscreenCanvas }
   | PipelineStart
   | { type: 'frame'; frame: VideoFrame; session: number; missed: number }
-  | { type: 'mode'; mode: LiveMode }
+  | { type: 'mode'; mode: LiveMode; modeRevision: number }
   | { type: 'effect'; effect: EffectId }
   | { type: 'stop' };
 /** 实时 Worker 启动成功后的确认，返回会话编号和已加载的 Wasm 实现。 */
@@ -80,6 +89,7 @@ export type PipelineStarted = { type: 'started'; session: number; available: Was
 export type PipelineMessage =
   | { type: 'caps'; mstp: boolean }
   | PipelineStarted
+  | { type: 'gpu-fallback'; session: number; message: string; mode: ImplementationId; modeRevision: number }
   | { type: 'ready'; session: number }
   | ({ type: 'stats'; session: number; format: VideoPixelFormat | null; size: string } & LiveStats)
   | { type: 'error'; session?: number; message: string };

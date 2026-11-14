@@ -40,7 +40,7 @@ td, th { padding: 13px 14px; border-bottom: 1px solid #e5eae7; height: 43px; whi
 td:first-child, th:first-child { text-align: left; }
 td.empty { text-align: center; color: #7d8982; }
 .dot { display: inline-block; width: 7px; height: 7px; margin-right: 9px; border-radius: 50%; }
-.js { background: #bd8a18; }.scalar { background: #648ca5; }.simd { background: #16815a; }.as-scalar { background: #9a86c4; }.as-simd { background: #5d3f9c; }
+.js { background: #bd8a18; }.scalar { background: #648ca5; }.simd { background: #16815a; }.as-scalar { background: #9a86c4; }.as-simd { background: #5d3f9c; }.webgl2 { background: #be4e34; }.webgpu { background: #267785; }
 .pass { color: #14704d; }
 .bars { display: grid; gap: 11px; padding: 20px 0 4px; }
 .bar-row { display: grid; grid-template-columns: 132px minmax(0, 1fr) 86px; align-items: center; gap: 14px; font-size: 12px; }

@@ -1,8 +1,8 @@
 import { getEffect } from './effects.ts';
-import { IMPLEMENTATIONS, JSProcessor, loadAllWasm } from './kernels.ts';
+import { IMPLEMENTATIONS, isGpu, JSProcessor, loadAllWasm } from './kernels.ts';
 import { coverRect, LiveMeter } from './live-stats.ts';
 import { wasmUrls } from './wasm-assets.ts';
-import type { ImplementationId, WasmProcessors } from './kernels.ts';
+import type { WasmProcessors } from './kernels.ts';
 import type { CaptureVideoElement, TrackProcessorScope } from './media-types.ts';
 import type { LiveView } from './ui-types.ts';
 import type { LiveConfig, LiveMode, LiveStats, PipelineKind, PipelineMessage, PipelineRequest, PipelineStart, PipelineStarted } from './worker-protocol.ts';
@@ -17,6 +17,10 @@ type LiveVideoOptions = {
   outputCanvas: HTMLCanvasElement;
   /** 获取当前 Worker 输出画布，用于转成 OffscreenCanvas 并交给 Worker。 */
   getWorkerCanvas: () => HTMLCanvasElement;
+  /** 与 CPU 画布分别绑定 WebGL2 和 2D 上下文。 */
+  getGpuCanvas: () => HTMLCanvasElement;
+  /** 独立的 WebGPU 输出画布。 */
+  getWebgpuCanvas: () => HTMLCanvasElement;
   /** Worker 出错后请 React 创建新画布。已转移过的画布无法再次转移。 */
   replaceWorkerCanvas: () => void;
   /** 停止实时处理时，将保存的固定帧重新绘制到输入画布。 */
@@ -67,7 +71,7 @@ type MainEngines = WasmProcessors & { width: number; height: number; js: JSProce
 
 // 协调主线程 Canvas 和 Worker VideoFrame 两条实时管线。
 // 帧处理留在各自管线内，React 只接收会话状态和定期汇总。
-export function createLiveVideo({ video, inputCanvas, outputCanvas, getWorkerCanvas, onChange, onError, restoreInput, replaceWorkerCanvas }: LiveVideoOptions) {
+export function createLiveVideo({ video, inputCanvas, outputCanvas, getWorkerCanvas, getGpuCanvas, getWebgpuCanvas, onChange, onError, restoreInput, replaceWorkerCanvas }: LiveVideoOptions) {
   const meter = new LiveMeter();
   let pipeline: Pipeline | undefined;
   // 用会话对象的身份校验异步结果，防止旧的权限请求或 Worker 消息影响新会话。
@@ -76,6 +80,7 @@ export function createLiveVideo({ video, inputCanvas, outputCanvas, getWorkerCan
   let engines: MainEngines | undefined;
   let output: ImageData;
   let settings: LiveConfig;
+  let modeRevision = 0;
 
   // 开始播放或切换效果、实现时重新统计，避免混入上一配置的耗时。
   function resetStats(session: Session) {
@@ -150,13 +155,15 @@ export function createLiveVideo({ video, inputCanvas, outputCanvas, getWorkerCan
       output = outputCanvas.getContext('2d')!.createImageData(width, height);
     }
     applyMainEffect();
-    if (settings.mode !== 'none' && !engines?.[settings.mode]) selectMode('scalar');
+    if (isGpu(settings.mode) || (settings.mode !== 'none' && !engines?.[settings.mode])) selectMode('scalar');
   }
 
   // 同步更新主线程全部引擎，切换实现时可以直接沿用当前效果。
   function applyMainEffect() {
     const effect = getEffect(settings.effect);
-    for (const id of Object.keys(IMPLEMENTATIONS) as ImplementationId[]) engines?.[id]?.setEffect(effect);
+    if (!engines) return;
+    const { width, height, ...processors } = engines;
+    for (const engine of Object.values(processors)) engine.setEffect(effect);
   }
 
   // 主线程对照管线：裁剪、读像素、应用滤镜、写回 Canvas，再预约下一帧。
@@ -176,7 +183,7 @@ export function createLiveVideo({ video, inputCanvas, outputCanvas, getWorkerCan
       const copied = performance.now();
       if (mode === 'none') output.data.set(pixels.data);
       else if (mode === 'js') output.data.set(current.js.run(pixels.data, passes));
-      else {
+      else if (!isGpu(mode)) {
         const engine = current[mode];
         if (!engine) { fail(`${IMPLEMENTATIONS[mode]} 不可用，请选择其他实现`); return; }
         engine.prepare(pixels.data);
@@ -215,7 +222,12 @@ export function createLiveVideo({ video, inputCanvas, outputCanvas, getWorkerCan
           if (data.type === 'started') pending?.resolve(data);
           else pending?.reject(new Error(data.message));
         } else if (active?.phase === 'playing' && active.workerSession === data.session) {
-          if (data.type === 'ready') active.inFlight = false;
+          if (data.type === 'gpu-fallback' && isGpu(settings.mode) && data.modeRevision === modeRevision) {
+            const failed = settings.mode;
+            selectMode(data.mode);
+            resetStats(active);
+            onError(`${IMPLEMENTATIONS[failed]} 不可用，已切换到 ${IMPLEMENTATIONS[data.mode]}：${data.message}`);
+          } else if (data.type === 'ready') active.inFlight = false;
           else if (data.type === 'stats') report(active, data);
           else if (data.type === 'error') fail(`实时管线错误：${data.message}`);
         }
@@ -233,7 +245,10 @@ export function createLiveVideo({ video, inputCanvas, outputCanvas, getWorkerCan
     }) };
     try {
       const offscreen = canvas.transferControlToOffscreen();
-      worker.postMessage({ type: 'init', canvas: offscreen } satisfies PipelineRequest, [offscreen]);
+      const gpuCanvas = getGpuCanvas().transferControlToOffscreen();
+      const webgpuCanvas = getWebgpuCanvas().transferControlToOffscreen();
+      worker.postMessage({ type: 'init', canvas: offscreen, gpuCanvas, webgpuCanvas } satisfies PipelineRequest,
+        [offscreen, gpuCanvas, webgpuCanvas]);
     } catch (error) {
       worker.terminate();
       replaceWorkerCanvas();
@@ -287,7 +302,8 @@ export function createLiveVideo({ video, inputCanvas, outputCanvas, getWorkerCan
     if (!session.camera) session.capture = video.captureStream?.() || video.mozCaptureStream?.();
     const track = (session.camera || session.capture)?.getVideoTracks()[0];
     const { width, height, passes, mode, effect } = settings;
-    const message: PipelineStart = { type: 'start', width, height, passes, mode, effect, frameRate: track?.getSettings().frameRate };
+    const revision = modeRevision;
+    const message: PipelineStart = { type: 'start', width, height, passes, mode, effect, modeRevision: revision, frameRate: track?.getSettings().frameRate };
     let transfer: Transferable[] = [];
     let sourcePath = '逐帧转移 VideoFrame';
     const TrackProcessor = (window as Window & TrackProcessorScope).MediaStreamTrackProcessor;
@@ -320,8 +336,10 @@ export function createLiveVideo({ video, inputCanvas, outputCanvas, getWorkerCan
     if (active !== session) return;
     session.workerSession = started.session;
     // 选中的 Wasm 构建不可用时回退到 C++ 标量版。
-    if (settings.mode !== 'js' && settings.mode !== 'none' && !started.available.includes(settings.mode)) selectMode('scalar');
-    if (settings.mode !== mode) current.worker.postMessage({ type: 'mode', mode: settings.mode } satisfies PipelineRequest);
+    if (settings.mode !== 'js' && settings.mode !== 'none' && !isGpu(settings.mode) && !started.available.includes(settings.mode)) selectMode('scalar');
+    if (settings.mode !== mode || modeRevision !== revision) {
+      current.worker.postMessage({ type: 'mode', mode: settings.mode, modeRevision } satisfies PipelineRequest);
+    }
     if (settings.effect !== effect) current.worker.postMessage({ type: 'effect', effect: settings.effect } satisfies PipelineRequest);
     if (sourcePath === '逐帧转移 VideoFrame') sendFrames(session, current.worker, started.session);
     return sourcePath;
@@ -366,16 +384,20 @@ export function createLiveVideo({ video, inputCanvas, outputCanvas, getWorkerCan
   }
 
   // 运行中切换效果或实现。Worker 接收配置消息，主线程在下一帧读取最新配置。
-  function update(change: Extract<PipelineRequest, { type: 'effect' | 'mode' }>) {
+  function update(change: Extract<PipelineRequest, { type: 'effect' }> | { type: 'mode'; mode: LiveMode }) {
     if (!active) return;
     if (change.type === 'effect') {
       settings = { ...settings, effect: change.effect };
       if (active.kind === 'main' && engines) applyMainEffect();
     } else {
       settings = { ...settings, mode: change.mode };
+      modeRevision++;
     }
     if (active.phase !== 'playing') return;
-    if (active.kind === 'worker') pipeline?.worker.postMessage(change);
+    if (active.kind === 'worker') {
+      const message: PipelineRequest = change.type === 'mode' ? { ...change, modeRevision } : change;
+      pipeline?.worker.postMessage(message);
+    }
     resetStats(active);
   }
 

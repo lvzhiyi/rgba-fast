@@ -1,9 +1,11 @@
+import { WebGPUProcessor } from './webgpu.ts';
+import { WebGLProcessor } from './webgl.ts';
 import { wasmUrls } from './wasm-assets.ts';
-import { IMPLEMENTATIONS, JSProcessor, loadAllWasm, validateConfig } from './kernels.ts';
+import { IMPLEMENTATIONS, isGpu, JSProcessor, loadAllWasm, validateConfig } from './kernels.ts';
 import { LiveMeter, coverRect, droppedBetween } from './live-stats.ts';
 import { getEffect } from './effects.ts';
-import type { EffectId } from './effects.ts';
-import type { WasmLoadErrors, WasmProcessors } from './kernels.ts';
+import type { EffectId, NamedEffect } from './effects.ts';
+import type { GpuId, WasmLoadErrors, WasmProcessors } from './kernels.ts';
 import type { TrackProcessorScope } from './media-types.ts';
 import type { LiveMode, PipelineMessage, PipelineRequest } from './worker-protocol.ts';
 
@@ -25,13 +27,13 @@ type Engines = {
   images: Map<Uint8Array<ArrayBuffer>, ImageData>;
 };
 /** 实时 Worker 当前使用的帧参数。interval 是估算掉帧用的期望帧间隔，单位为微秒。 */
-type Settings = { width: number; height: number; passes: number; mode: LiveMode; interval: number };
+type Settings = { width: number; height: number; passes: number; mode: LiveMode; modeRevision: number; interval: number };
 
-// 实时视频管线（Worker 端）：VideoFrame → Wasm 线性内存 → 滤镜 → OffscreenCanvas。
+// 实时视频管线（Worker 端）：VideoFrame → CPU 像素缓冲区或 GPU 纹理 → 滤镜 → OffscreenCanvas。
 // 帧来源两种：MediaStreamTrackProcessor 的 ReadableStream，或主线程逐帧转移的 VideoFrame。
 //
 // 与主线程的消息协议：
-//   收到 init   { canvas }          —— 只发一次，拿到输出用的 OffscreenCanvas
+//   收到 init   { canvas, gpuCanvas, webgpuCanvas }          —— 只发一次，拿到 CPU / GPU 各自的 OffscreenCanvas
 //   收到 start  { width, height, passes, mode, effect, frameRate, readable | track }
 //   收到 frame  { frame, session, missed } —— 回退路径：主线程逐帧送来
 //   收到 mode / effect               —— 运行中切换实现或效果
@@ -42,6 +44,13 @@ type Settings = { width: number; height: number; passes: number; mode: LiveMode;
 const STATS_INTERVAL = 500;          // 每 500 ms 向主线程汇报一次统计
 const meter = new LiveMeter();
 let canvas: OffscreenCanvas;
+let gpuCanvas: OffscreenCanvas;
+let webgpuCanvas: OffscreenCanvas;
+let gpu: WebGLProcessor | undefined;
+let webgpu: WebGPUProcessor | undefined;
+let effect: NamedEffect;
+let revision = 0;
+let gpuSamples: number[] = [];
 let context: OffscreenCanvasRenderingContext2D;
 let engines: Engines | undefined;
 let settings: Settings | undefined;
@@ -78,8 +87,10 @@ async function prepareEngines(width: number, height: number, token: number) {
 
 // 把效果参数同时设到所有引擎上，切换实现时不用再设一次。
 function applyEffect(id: EffectId) {
+  effect = getEffect(id);
+  gpu?.setEffect(effect);
+  webgpu?.setEffect(effect);
   if (!engines) return;
-  const effect = getEffect(id);
   for (const engine of [engines.js, ...Object.values(engines.wasm)]) engine.setEffect(effect);
 }
 
@@ -124,45 +135,166 @@ async function copyIn(frame: VideoFrame, target: Uint8Array<ArrayBuffer>, width:
   return 'Canvas 读像素';
 }
 
-// 处理一帧，分三段计时：取像素（copyIn）→ 跑效果（process）→ 画到 Canvas（output）。
-// VideoFrame 占用的是解码器 / GPU 的显存，数量有限，用完必须 close()，否则视频流会卡住。
+// GPU 单独持有画布；切回 CPU 时仍使用原有的 2D 上下文。
+function prepareGpu(width: number, height: number) {
+  if (gpu) return gpu;
+  const next = new WebGLProcessor(gpuCanvas, width, height);
+  try {
+    next.prepareVideo();
+    next.setEffect(effect);
+    gpu = next;
+    return next;
+  } catch (error) {
+    next.dispose();
+    throw error;
+  }
+}
+
+function resetMeter() {
+  revision++;
+  meter.reset();
+  gpuSamples = [];
+  lastStats = performance.now();
+}
+
+// GPU 不可用时优先保留 C++ SIMD 对照，之后依次尝试 C++ 标量和 JS。
+function fallbackGpu(error: unknown, token: number, backend: GpuId) {
+  if (!settings || token !== session) return;
+  if (backend === 'webgpu') {
+    webgpu?.dispose();
+    webgpu = undefined;
+  } else {
+    gpu?.dispose();
+    gpu = undefined;
+  }
+  const wasm = engines?.wasm;
+  const mode = wasm?.simd ? 'simd' : wasm?.scalar ? 'scalar' : 'js';
+  settings.mode = mode;
+  resetMeter();
+  post({ type: 'gpu-fallback', session: token, mode, modeRevision: settings.modeRevision, message: error instanceof Error ? error.message : String(error) });
+}
+
+function reportFrame(token: number, format: VideoPixelFormat | null, width: number, height: number) {
+  if (performance.now() - lastStats < STATS_INTERVAL) return;
+  lastStats = performance.now();
+  const summary = meter.summary();
+  const gpuMean = gpuSamples.length ? gpuSamples.reduce((sum, value) => sum + value, 0) / gpuSamples.length : undefined;
+  meter.next();
+  gpuSamples = [];
+  if (summary) post({ type: 'stats', session: token, ...summary, path, format,
+    fallbackReason: settings && isGpu(settings.mode) ? undefined : fallbackReason, gpuMean, size: `${width}×${height}` });
+}
+
+async function processGpuFrame(frame: VideoFrame, token: number, frameRevision: number, config: Settings, backend: GpuId) {
+  const { width, height, passes } = config;
+  let start: number;
+  const currentFrame = () => token === session && revision === frameRevision;
+  const format = frame.format;
+  let bitmap: ImageBitmap | undefined;
+  let processor: WebGLProcessor | WebGPUProcessor;
+  try {
+    if (backend === 'webgpu') {
+      if (!webgpu) {
+        const next = await WebGPUProcessor.create(width, height);
+        if (!currentFrame()) {
+          next.dispose();
+          return;
+        }
+        try {
+          next.prepareVideo(webgpuCanvas);
+          next.setEffect(effect);
+          webgpu = next;
+        } catch (error) {
+          next.dispose();
+          throw error;
+        }
+      }
+      processor = webgpu;
+    } else {
+      processor = prepareGpu(width, height);
+    }
+    start = performance.now();
+    const exact = frame.displayWidth === width && frame.displayHeight === height &&
+      frame.visibleRect?.width === width && frame.visibleRect?.height === height;
+    if (!exact) {
+      const rect = coverRect(frame.displayWidth, frame.displayHeight, width, height);
+      bitmap = await createImageBitmap(frame, rect.x, rect.y, rect.width, rect.height,
+        { resizeWidth: width, resizeHeight: height, resizeQuality: 'low' });
+    }
+    if (!currentFrame()) return;
+    processor.uploadVideo(bitmap ?? frame);
+    const label = backend === 'webgpu' ? 'WebGPU' : 'WebGL2';
+    path = bitmap ? `缩放 + ${label} 纹理上传` : `VideoFrame → ${label} 纹理`;
+  } finally {
+    bitmap?.close();
+    frame.close();
+  }
+  const copied = performance.now();
+  let processed: number;
+  let gpuTime: number | null;
+  if (processor instanceof WebGPUProcessor) {
+    processor.run(passes, 1, processor.supportsGpuTiming);
+    processed = performance.now();
+    processor.present();
+    await processor.waitForFrame();
+    gpuTime = await processor.timerResult();
+  } else {
+    const query = processor.startTimer();
+    processor.run(passes);
+    processor.stopTimer(query);
+    processed = performance.now();
+    processor.present();
+    // 会话停止时可提前取消轮询。热切换仍等在途帧完成。
+    try {
+      await processor.waitForFrame(() => token === session);
+    } finally {
+      gpuTime = await processor.timerResult(query, false);
+    }
+  }
+  if (!currentFrame()) return;
+  if (gpuTime !== null) gpuSamples.push(gpuTime);
+  const end = performance.now();
+  meter.add({ copyIn: copied - start, process: processed - copied, output: end - processed, total: end - start });
+  reportFrame(token, format, width, height);
+}
+
+// 拿到帧后立即取得所有权；每条处理路径负责关闭自己持有的帧。
 async function processFrame(frame: VideoFrame, token: number) {
   const current = engines;
   const config = settings;
   if (!current || !config) { frame.close(); return; }
+  const frameRevision = revision;
   const { mode, passes, width, height } = config;
+  if (isGpu(mode)) {
+    try {
+      await processGpuFrame(frame, token, frameRevision, config, mode);
+    } catch (error) {
+      if (frameRevision === revision) fallbackGpu(error, token, mode);
+    }
+    return;
+  }
+
   const start = performance.now();
   const wasm = mode === 'none' || mode === 'js' ? undefined : current.wasm[mode];
   if (mode !== 'none' && mode !== 'js' && !wasm) {
     frame.close();
-    throw new Error(`${IMPLEMENTATIONS[mode] ?? mode} 不可用：${current.errors[mode] ?? '未知实现'}`);
+    throw new Error(`${IMPLEMENTATIONS[mode]} 不可用：${current.errors[mode] ?? '未知实现'}`);
   }
   const target = wasm ? wasm.input : current.plain;
-  let format: VideoPixelFormat | null;
-  try {
-    format = frame.format;
-    path = await copyIn(frame, target, width, height);
-  } finally {
-    frame.close();
-  }
-  if (token !== session) return;
+  const format = frame.format;
+  const framePath = await copyIn(frame, target, width, height).finally(() => frame.close());
+  if (token !== session || frameRevision !== revision) return;
+  path = framePath;
   const copied = performance.now();
   // 原始画面模式下 output 就是输入本身。
   let output = target;
   if (mode === 'js') output = current.js.run(target, passes);
   else if (wasm) output = wasm.run(passes);
   const processed = performance.now();
-  // 按结果缓冲区查出预先建好的 ImageData（它直接包着那块内存），画到 OffscreenCanvas 上，页面会自动显示。
   context.putImageData(current.images.get(output)!, 0, 0);
   const end = performance.now();
   meter.add({ copyIn: copied - start, process: processed - copied, output: end - processed, total: end - start });
-  if (end - lastStats >= STATS_INTERVAL) {
-    lastStats = end;
-    const summary = meter.summary();
-    meter.next();
-    if (summary) post({ type: 'stats', session: token, ...summary, path, format, fallbackReason,
-      size: `${width}×${height}` });
-  }
+  reportFrame(token, format, width, height);
 }
 
 // 主路径的取帧循环：从 ReadableStream 一帧帧读出 VideoFrame 并处理，处理完一帧才读下一帧。
@@ -218,13 +350,15 @@ function stop() {
 worker.onmessage = async ({ data }: MessageEvent<PipelineRequest>) => {
   if (data.type === 'init') {
     canvas = data.canvas;
+    gpuCanvas = data.gpuCanvas;
+    webgpuCanvas = data.webgpuCanvas;
     context = canvas.getContext('2d')!;
   } else if (data.type === 'start') {
     // 先结束旧会话，再记下新会话号；之后每个 await 之后都要检查它是否仍然有效。
     stop();
     const token = session;
-    const { width, height, passes, mode, frameRate, effect } = data;
-    // 帧流已转交到这里；只要没有交给 pump，就必须取消它，否则其中缓存的 VideoFrame 不会被 close。
+    const { width, height, passes, mode, modeRevision, frameRate, effect } = data;
+    // 帧流已转交到这里；未交给 pump 时也要排空并关闭缓存的帧。
     let handed = false;
     const discard = () => {
       if (handed) return;
@@ -235,12 +369,15 @@ worker.onmessage = async ({ data }: MessageEvent<PipelineRequest>) => {
       validateConfig(width, height, passes);
       await prepareEngines(width, height, token);
       if (token !== session || !engines) { discard(); return; }
+      gpu?.dispose();
+      gpu = undefined;
+      webgpu?.dispose();
+      webgpu = undefined;
       applyEffect(effect);
-      settings = { width, height, passes, mode, interval: frameRate && frameRate > 0 ? 1e6 / frameRate : 0 };
+      settings = { width, height, passes, mode, modeRevision, interval: frameRate && frameRate > 0 ? 1e6 / frameRate : 0 };
       canvas.width = width;
       canvas.height = height;
-      meter.reset();
-      lastStats = performance.now();
+      resetMeter();
       previousTimestamp = undefined;
       minInterval = Infinity;
       path = '';
@@ -273,9 +410,11 @@ worker.onmessage = async ({ data }: MessageEvent<PipelineRequest>) => {
     post({ type: 'ready', session: data.session });
   } else if (data.type === 'mode') {
     // 切换实现：下一帧起生效；统计清零，避免新旧实现的耗时混在一起。
-    if (settings) settings.mode = data.mode;
-    meter.reset();
-    lastStats = performance.now();
+    if (settings) {
+      settings.mode = data.mode;
+      settings.modeRevision = data.modeRevision;
+    }
+    resetMeter();
   } else if (data.type === 'effect') {
     // 效果参数写进 Wasm 内存即可，下一帧生效，无需重启管线。
     try {
@@ -283,10 +422,13 @@ worker.onmessage = async ({ data }: MessageEvent<PipelineRequest>) => {
     } catch (error) {
       post({ type: 'error', session, message: error instanceof Error ? error.message : String(error) });
     }
-    meter.reset();
-    lastStats = performance.now();
+    resetMeter();
   } else if (data.type === 'stop') {
     stop();
     settings = undefined;
+    gpu?.dispose();
+    gpu = undefined;
+    webgpu?.dispose();
+    webgpu = undefined;
   }
 };

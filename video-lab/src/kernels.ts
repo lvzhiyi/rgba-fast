@@ -210,8 +210,16 @@ export const WASM_BUILDS = [
 
 /** 四种 Wasm 构建的标识，由构建清单推导。 */
 export type WasmId = typeof WASM_BUILDS[number]['id'];
-/** 所有可参与基准比较的实现标识，包括 TypeScript 实现和四种 Wasm 构建。 */
+/** CPU 实现标识，包括 TypeScript 实现和四种 Wasm 构建。 */
 export type ImplementationId = 'js' | WasmId;
+/** 基准和实时对照可选的 CPU 或 GPU 实现。 */
+export type GpuId = 'webgl2' | 'webgpu';
+/** 可参与对照的 CPU 和 GPU 实现。 */
+export type BackendId = ImplementationId | GpuId;
+
+export function isGpu(id: string): id is GpuId {
+  return id === 'webgl2' || id === 'webgpu';
+}
 /** 已加载的 Wasm 处理器，浏览器无法加载的可选实现没有对应条目。 */
 export type WasmProcessors = Partial<Record<WasmId, WasmProcessor>>;
 /** 按构建标识记录可选 Wasm 模块的加载失败原因。 */
@@ -219,7 +227,7 @@ export type WasmLoadErrors = Partial<Record<WasmId, string>>;
 
 // 实现 id → 显示名，界面上的下拉框、表格行都由它生成。
 export const IMPLEMENTATIONS = { js: 'JavaScript',
-  ...Object.fromEntries(WASM_BUILDS.map(build => [build.id, build.name])) } as Record<ImplementationId, string>;
+  ...Object.fromEntries(WASM_BUILDS.map(build => [build.id, build.name])), webgl2: 'WebGL2 · 片元着色器', webgpu: 'WebGPU · Compute' } as Record<BackendId, string>;
 
 // 加载全部 Wasm 构建，返回 { processors: { id: WasmProcessor }, errors: { id: 原因 } }。
 export async function loadAllWasm(urls: Record<WasmId, string>, width: number, height: number) {

@@ -1,10 +1,10 @@
 import { Download, Play, Square } from 'lucide-react';
 import { EFFECTS, getEffect } from '../effects.ts';
-import { IMPLEMENTATIONS } from '../kernels.ts';
+import { IMPLEMENTATIONS, isGpu } from '../kernels.ts';
 import { exportResult } from '../useBenchmark.ts';
 import type { useBenchmark } from '../useBenchmark.ts';
 import type { EffectId, NamedEffect } from '../effects.ts';
-import type { WasmId } from '../kernels.ts';
+import type { BackendId, WasmId } from '../kernels.ts';
 import type { ChangeOption, LabOptions, Status } from '../ui-types.ts';
 import type { BenchmarkRecord, BenchmarkRow } from '../worker-protocol.ts';
 
@@ -21,14 +21,16 @@ type BenchmarkControlsProps = {
   onStart: () => void;
 };
 
-const ms = (value: number) => `${value.toFixed(3)} ms`;
+const ms = (value: number | undefined) => value == null ? '—' : `${value.toFixed(3)} ms`;
 const ratio = (value: number | null) => value == null ? '--' : `${value.toFixed(2)}×`;
 
 // 页面摘要与历史记录统一用 JavaScript 中位数除以 C++ SIMD 中位数。
 function speedup(result: BenchmarkRecord, metric: 'compute' | 'total') {
   const js = result.rows.find(row => row.id === 'js');
   const simd = result.rows.find(row => row.id === 'simd');
-  return simd && js ? js[metric].median / simd[metric].median : null;
+  const baseline = js?.[metric]?.median;
+  const measured = simd?.[metric]?.median;
+  return baseline !== undefined && measured ? baseline / measured : null;
 }
 
 // 渲染基准参数和开始、停止、导出操作。测试和图片解码期间锁定参数。
@@ -80,7 +82,7 @@ function Summary({ result, failed }: { result: BenchmarkRecord | null; failed: b
         <div key={metric}>
           <span className="eyebrow">{label} · JS / C++ SIMD</span>
           <strong>{result ? (simd ? ratio(speedup(result, metric)) : '不可用') : '--'}</strong>
-          <span className="muted">{simd && js ? `${ms(js[metric].median)} → ${ms(simd[metric].median)}` : result ? unavailable : '等待采样'}</span>
+          <span className="muted">{simd && js ? `${ms(js[metric]?.median)} → ${ms(simd[metric]?.median)}` : result ? unavailable : '等待采样'}</span>
         </div>
       ))}
       <div>
@@ -104,13 +106,13 @@ function ResultRows({ result }: { result: BenchmarkRecord | null }) {
       {result.rows.map(row => (
         <tr key={row.id}>
           <td><span className={`dot ${row.id}`} />{IMPLEMENTATIONS[row.id]}</td>
-          <td>{ms(row.compute.median)}</td><td>{row.id === 'js' ? '—' : ms(row.upload.median)}</td>
-          <td>{ms(row.download.median)}</td><td><b>{ms(row.total.median)}</b></td>
+          <td>{ms(row.compute?.median)}</td><td>{row.id === 'js' ? '—' : ms(row.upload?.median)}</td>
+          <td>{ms(row.download?.median)}</td><td><b>{ms(row.total.median)}</b></td>
           <td>{ms(row.total.p95)}</td><td className="pass">完全一致</td>
         </tr>
       ))}
       {Object.entries(result.loadErrors).map(([id, message]) => (
-        <tr key={id}><td colSpan={7}>{IMPLEMENTATIONS[id as WasmId]} 不可用：{message}</td></tr>
+        <tr key={id}><td colSpan={7}>{IMPLEMENTATIONS[id as BackendId]} 不可用：{message}</td></tr>
       ))}
     </>
   );
@@ -139,17 +141,29 @@ function resultMeta(result: BenchmarkRecord | null, effect: NamedEffect) {
   return `${effect.name} · ${width} × ${height} · ${passes} 轮 · ${samples} 批 × ${result.batchSize} 次 · 预热 ${result.warmup} 次`;
 }
 
+// SIMD 与 GPU 用同一口径比较：JS 输入到 JS 输出的中位数。
+function gpuComparison(result: BenchmarkRecord) {
+  const simd = result.rows.find(row => row.id === 'simd');
+  if (!simd) return '';
+  return result.rows.filter(row => isGpu(row.id) && row.total.median > 0).map(row =>
+    ` C++ SIMD ÷ ${IMPLEMENTATIONS[row.id]} 含读回总耗时：${ratio(simd.total.median / row.total.median)}。`).join('');
+}
+
 // 展示同类 Wasm 构建的 AS / C++ 耗时比，并说明中位数和 P95 的统计口径。
 function resultNote(result: BenchmarkRecord | null) {
-  if (!result) return '计时不包含模块加载与编译、视频解码和 Canvas 绘制。';
+  if (!result) return '固定帧总耗时从 JS 输入到 JS 输出，包含像素读回。';
   // 标量和 SIMD 分开比较，任一模块缺失时保留占位。
   const pair = (as: WasmId, cpp: WasmId) => {
     const a = result.rows.find(row => row.id === as);
     const c = result.rows.find(row => row.id === cpp);
-    return a && c ? ratio(a.compute.median / c.compute.median) : '--';
+    return a?.compute && c?.compute?.median ? ratio(a.compute.median / c.compute.median) : '--';
   };
   return `AssemblyScript ÷ C++ 计算耗时：标量 ${pair('as-scalar', 'scalar')}，SIMD ${pair('as-simd', 'simd')}（大于 1 表示 AS 更慢）。`
-    + '耗时为每批的单次均值，P95 为批均值 P95。总耗时含输入复制、计算和输出复制；分项中位数之和不一定等于总中位数。加速比小于 1 表示 Wasm 更慢。';
+    + (result.rows.some(row => isGpu(row.id))
+      ? ' GPU 计算列来自独立的硬件查询，缺失时用 — 表示。GPU 输出段含执行等待与读回。'
+      : '')
+    + gpuComparison(result)
+    + ' 耗时为每批的单次均值，P95 为批均值 P95。总耗时含输入复制、计算和输出复制；分项中位数之和不一定等于总中位数。加速比小于 1 表示 Wasm 更慢。';
 }
 
 // 组合基准摘要、进度、实现对照表和耗时图，统一消费同一次测试结果。
@@ -165,7 +179,7 @@ export function BenchmarkResults({ benchmark, effectId }: { benchmark: Benchmark
         </div>
         <div className="progress-track"><div id="progress" style={{ width: `${progress}%` }} /></div>
         <div className="table-scroll"><table>
-          <thead><tr><th>实现</th><th>计算中位数</th><th>输入复制</th><th>输出复制</th><th>总耗时中位数</th><th>批均值 P95</th><th>校验</th></tr></thead>
+          <thead><tr><th>实现</th><th>计算中位数</th><th>输入复制 / 提交</th><th>输出复制 / 等待读回</th><th>总耗时中位数</th><th>批均值 P95</th><th>校验</th></tr></thead>
           <tbody><ResultRows result={result} /></tbody>
         </table></div>
         {result && <Bars rows={result.rows} />}
